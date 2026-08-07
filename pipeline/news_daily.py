@@ -80,6 +80,16 @@ def step_dedup(items):
     return dedup.dedup_items(items)
 
 
+def step_fetch_full_text(items, delay_sec=1.0):
+    """Step 2.5: enrich surviving items with fetched article body.
+
+    Runs AFTER dedup + age filter, BEFORE translate — so only the items that
+    actually need translation (5-15 items) trigger an HTTP request, not the
+    raw 150+ RSS entries.
+    """
+    return rss_fetch.fetch_full_text_for_items(items, delay_sec=delay_sec)
+
+
 def step_translate(items, chunk_size=8):
     return translate.analyze_items_batch(items, chunk_size=chunk_size)
 
@@ -278,6 +288,11 @@ def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
         before = len(items)
         items = filter_by_age(items, max_days)
         print(f"  age filter (≤ {max_days}d): {before} → {len(items)} items", flush=True)
+
+    # Step 4c: fetch full article body (only for items that survived every
+    # gate so far — typically 5-15 items, not the raw 150+ RSS entries).
+    items = _step("4c. fetch_full_text",
+                  lambda: step_fetch_full_text(items, delay_sec=1.0)) or []
 
     # Step 5: translate (batched LLM)
     items = _step("5. translate_batch",

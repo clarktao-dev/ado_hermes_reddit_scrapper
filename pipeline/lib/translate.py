@@ -59,72 +59,299 @@ if _REDDIT_SAFE_SRC not in sys.path:
 
 from reddit_safe.pipeline.llm_client import call_json, LLMError  # noqa: E402
 
-SYSTEM = """你是德文→**繁體中文 (台灣)** 的房地產/金融新聞分析師。**禁止使用簡體中文**。
+# --------------------------------------------------------------------------- #
+# 簡體→繁體 (台灣) 轉換表 + 驗證
+# --------------------------------------------------------------------------- #
+# LLM 偶爾會在 SYSTEM prompt 警告後還是吐簡體。我們不能只相信 prompt —
+# 必須在程式碼層把關。兩道：
+#   1. force_traditional(text): 自動把常見簡體字轉成台灣繁體
+#   2. has_simplified(text): 檢測是否還有簡體字（給 retry / gate 用）
+# --------------------------------------------------------------------------- #
+_SIMPLIFIED_TO_TRADITIONAL_MAP = {
+    # 高頻常見字
+    "软": "軟", "资": "資", "网": "網", "据": "據", "档": "檔",
+    "务": "務", "链": "鏈", "码": "碼", "为": "為", "应": "應",
+    "头": "頭", "实": "實", "际": "際", "业": "業", "场": "場",
+    "结": "結", "构": "構", "计": "計", "术": "術", "这": "這",
+    "进": "進", "众": "眾", "创": "創", "与": "與", "专": "專",
+    "产": "產", "发": "發", "时": "時", "车": "車", "见": "見",
+    "观": "觀", "记": "記", "议": "議", "论": "論", "请": "請",
+    "说": "說", "话": "話", "报": "報", "读": "讀", "闻": "聞",
+    "对": "對", "门": "門", "问": "問", "间": "間", "长": "長",
+    "万": "萬", "亿": "億", "号": "號", "类": "類", "种": "種",
+    "样": "樣", "视": "視", "现": "現", "动": "動", "区": "區",
+    "单": "單", "双": "雙", "图": "圖", "声": "聲", "处": "處",
+    "变": "變", "历": "歷", "归": "歸", "确": "確", "层": "層",
+    "价": "價", "备": "備", "导": "導", "岁": "歲",
+    "线": "線", "总": "總", "续": "續", "围": "圍", "规": "規",
+    "约": "約", "团": "團", "显": "顯", "调": "調",
+    "运": "運", "输": "輸", "银": "銀", "铁": "鐵", "错": "錯",
+    "试": "試", "验": "驗", "点": "點", "题": "題", "项": "項",
+    "额": "額", "并": "並", "亲": "親", "设": "設", "认": "認",
+    "让": "讓", "领": "領", "养": "養", "补": "補", "贷": "貸",
+    "讨": "討", "财": "財", "贸": "貿",
+    # 房地產新聞高頻
+    "测": "測", "赔": "賠", "赚": "賺", "购": "購",
+    "卖": "賣", "货": "貨", "费": "費",
+    "钱": "錢", "币": "幣", "钞": "鈔",
+    "账": "賬", "税": "稅", "债": "債",
+    "国": "國", "华": "華", "语": "語",
+    "学": "學", "习": "習", "书": "書", "写": "寫",
+    "听": "聽", "评": "評", "讲": "講", "谈": "談",
+    "录": "錄", "纸": "紙", "张": "張", "页": "頁",
+    "画": "畫", "频": "頻", "台": "臺",
+    "广": "廣", "灯": "燈", "电": "電", "脑": "腦", "机": "機",
+    "缆": "纜", "传": "傳", "卫": "衛", "护": "護", "险": "險",
+    "庄": "莊",
+}
+# Build a str.translate table from the explicit map so the runtime is fast.
+_SIMPLIFIED_TO_TRADITIONAL_TABLE = str.maketrans(_SIMPLIFIED_TO_TRADITIONAL_MAP)
+# The set of source characters (still str, not codepoints).
+_SIMPLIFIED_KEYS = set(_SIMPLIFIED_TO_TRADITIONAL_MAP.keys())
 
-任務：對輸入的德文新聞做：
-1. 完整中文翻譯（保留所有數字、人名、機構名）
-2. 200-300 字中文摘要
-3. 抽取關鍵實體（機構/法案/數字/人物）
+
+def force_traditional(text):
+    """Auto-convert any simplified Chinese characters in `text` to their
+    Traditional (Taiwan) equivalents. Best-effort: covers the high-frequency
+    set in _SIMPLIFIED_TO_TRADITIONAL_MAP. Returns (converted_text, num_replacements).
+    """
+    if not text:
+        return text, 0
+    out = text.translate(_SIMPLIFIED_TO_TRADITIONAL_TABLE)
+    n = sum(1 for c in text if c in _SIMPLIFIED_KEYS)
+    return out, n
+
+
+def has_simplified(text):
+    """True if `text` still contains any tracked simplified character after
+    force_traditional() has been applied."""
+    if not text:
+        return False
+    return any(c in _SIMPLIFIED_KEYS for c in text)
+
+
+# --------------------------------------------------------------------------- #
+# Per-item validation gate — one rule per SYSTEM prompt requirement
+# --------------------------------------------------------------------------- #
+# Returns a list of (rule_name, severity, message) tuples. Empty list = pass.
+# Severities: 'error' = reject item, 'warn' = log but keep.
+# Rules correspond 1:1 to clauses in the SYSTEM prompt.
+# --------------------------------------------------------------------------- #
+_RELEVANCE_LO = 0
+_RELEVANCE_HI = 10
+_MIN_SUMMARY_LEN = 60       # 絕對下限（防止完全空摘要）
+_MAX_SUMMARY_LEN = 280      # 絕對上限（防止 LLM 瞎擴寫）
+_MIN_SUMMARY_RATIO = 0.30   # 摘要字數 >= 原文 CJK 字數的 30%
+_MAX_SUMMARY_RATIO = 1.50   # 摘要字數 <= 原文 CJK 字數的 150%
+_MIN_TAGS = 3
+_MAX_TAGS = 5
+_MAX_VALIDATION_RETRIES = 2  # analyze_item 重試次數（超過就 fail）
+
+
+def _count_cjk(text):
+    return sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+
+
+def validate_zh_item(item):
+    """Validate that `item` conforms to every clause in the SYSTEM prompt.
+
+    Returns a list of (rule, severity, message). Empty list = all passed.
+
+    Use `validate_severity(issues, level='error')` to filter.
+    """
+    issues = []
+
+    # Rule 1: title_zh must exist and not be empty
+    title = item.get("title_zh") or ""
+    if not title.strip():
+        issues.append(("title_empty", "error", "title_zh is empty"))
+    # Rule 1b: title must be Traditional Chinese
+    if title and has_simplified(title):
+        issues.append(("title_simplified", "error",
+                       f"title_zh has simplified chars: {title[:50]!r}"))
+
+    # Rule 2: summary_zh must exist
+    summary = item.get("summary_zh") or ""
+    if not summary.strip():
+        issues.append(("summary_empty", "error", "summary_zh is empty"))
+    # Rule 2b: summary must be Traditional Chinese
+    if summary and has_simplified(summary):
+        issues.append(("summary_simplified", "error",
+                       f"summary_zh has simplified chars: {summary[:50]!r}"))
+
+    # Rule 3: summary length (CJK chars only; exclude German URLs/numbers)
+    cjk_len = _count_cjk(summary)
+    if summary and cjk_len < _MIN_SUMMARY_LEN:
+        issues.append(("summary_too_short", "error",
+                       f"summary_zh CJK length {cjk_len} < {_MIN_SUMMARY_LEN}"))
+    if summary and cjk_len > _MAX_SUMMARY_LEN:
+        issues.append(("summary_too_long", "error",
+                       f"summary_zh CJK length {cjk_len} > {_MAX_SUMMARY_LEN} "
+                       "(possible LLM hallucination expansion)"))
+
+    # Rule 4: entities must be a dict with the right keys (each can be empty list)
+    entities = item.get("entities")
+    if entities is None:
+        issues.append(("entities_missing", "error", "entities field missing"))
+    elif not isinstance(entities, dict):
+        issues.append(("entities_wrong_type", "error",
+                       f"entities is {type(entities).__name__}, expected dict"))
+    else:
+        for key in ("institutions", "laws", "numbers", "people"):
+            v = entities.get(key)
+            if v is None:
+                issues.append(("entities_key_missing", "error",
+                               f"entities.{key} missing"))
+            elif not isinstance(v, list):
+                issues.append(("entities_key_wrong_type", "error",
+                               f"entities.{key} is {type(v).__name__}, expected list"))
+
+    # Rule 5: tags count 3-5
+    tags = item.get("tags") or []
+    if not isinstance(tags, list):
+        issues.append(("tags_wrong_type", "error",
+                       f"tags is {type(tags).__name__}, expected list"))
+    elif len(tags) < _MIN_TAGS:
+        issues.append(("tags_too_few", "error",
+                       f"tags count {len(tags)} < {_MIN_TAGS}"))
+    elif len(tags) > _MAX_TAGS:
+        issues.append(("tags_too_many", "warn",
+                       f"tags count {len(tags)} > {_MAX_TAGS}"))
+
+    # Rule 6: relevance_to_buyer must be int in [0, 10]
+    rel = item.get("relevance_to_buyer")
+    if rel is None:
+        issues.append(("relevance_missing", "error",
+                       "relevance_to_buyer missing (LLM failed to return it)"))
+    elif not isinstance(rel, int):
+        try:
+            rel = int(rel)
+        except (TypeError, ValueError):
+            issues.append(("relevance_wrong_type", "error",
+                           f"relevance_to_buyer is {type(rel).__name__}, expected int"))
+            rel = None
+    if rel is not None and isinstance(rel, int) and not (_RELEVANCE_LO <= rel <= _RELEVANCE_HI):
+        issues.append(("relevance_out_of_range", "error",
+                       f"relevance_to_buyer {rel} not in [{_RELEVANCE_LO}, {_RELEVANCE_HI}]"))
+
+    # Rule 7: source_name / url must be present (sanity check)
+    if not item.get("source_name"):
+        issues.append(("source_name_missing", "error", "source_name missing"))
+    if not item.get("url"):
+        issues.append(("url_missing", "error", "url missing"))
+
+    return issues
+
+
+def filter_errors(issues):
+    """Keep only error-level issues."""
+    return [i for i in issues if i[1] == "error"]
+
+
+def has_errors(issues):
+    return any(sev == "error" for _rule, sev, _msg in issues)
+
+
+SYSTEM = """你是德文→繁體中文 (台灣) 的房地產新聞分析師。
+
+**🚨 絕對禁止簡體中文 — 用台灣繁體正體 🚨**
+常見字（簡→繁）：软→軟、资→資、网→網、視→視、据→據、档→檔、务→務、链→鏈、码→碼、为→為、应→應、头→頭、实→實、际→際、业→業、场→場、结→結、构→構、计→計、术→術、这→這、进→進、众→眾、创→創、与→與、专→專、产→產、发→發、时→時、车→車、见→見、观→觀、记→記、议→議、论→論、请→請、说→說、话→話、报→報、读→讀、闻→聞。
+
+**如果你寫出簡體，整篇摘要會被視為失敗。**
+
+任務：
+1. 繁體中文翻譯（保留數字、人名、機構名）
+2. **150-300 字摘要 — 必須完全根據內文，禁止推論/編造/加背景知識**
+3. 抽取關鍵實體
 4. 3-5 個 tag
 
-德文房地產/金融專有名詞首次出現時保留原文 + 中文括弧。
+**relevance_to_buyer 評分 (0-10)**：
+- 0-2：完全無關（純股市、科技、政治、娛樂、體育、人物軼事）
+- 3-4：邊緣（一般經濟政策、利率走勢、純企業財報）
+- 5-6：中等（房貸利率變動、區域房市數據、建築法規更新）
+- 7-8：高度相關（房貸新規、區域價格變化、補貼政策變動、租賃法變動）
+- 9-10：極度重要（KfW 重大政策、聯邦最高法院房貸判例、首付新規）
 
-**強制用台灣繁體正體（不是中國大陸簡體）**。常見字對照：
-- 軟體 ≠ 软件
-- 資訊 ≠ 信息
-- 網路 ≠ 网络
-- 影片 ≠ 视频
-- 資料庫 ≠ 数据库
-- 建築 ≠ 建筑
-- 市場 ≠ 市场
-- 意味著 ≠ 意味着
-- 資料 ≠ 资料
-- 檔案 ≠ 文件
-- 伺服器 ≠ 服务器
-- 連結 ≠ 链接
-- 預設 ≠ 默认
-- 程式 ≠ 程序
-- 視訊 ≠ 视频
-
-輸出嚴格 JSON 物件，無 markdown 圍欄，無 commentary：
+輸出嚴格 JSON，無 markdown 圍欄：
 {
   "title_zh": "...",
   "summary_zh": "...",
   "entities": {"institutions": [...], "laws": [...], "numbers": [...], "people": [...]},
   "tags": ["#tag1", "#tag2", ...],
-  "relevance_to_buyer": <0-10 整數, 對「在德國買房/有房者」的相關程度>
-}
-
-**relevance_to_buyer 評分標準**：
-- 0-2：完全無關（純股市、純科技、純政治、娛樂、體育、人物軼事）
-- 3-4：邊緣（一般經濟政策、利率走勢、純企業財報，未直接觸及房地產）
-- 5-6：中等（房貸利率變動、區域房市數據、建築法規更新）
-- 7-8：高度相關（房貸新規、區域價格變化、補貼政策變動、租賃法變動）
-- 9-10：極度重要（KfW 重大政策、聯邦最高法院房貸判例、首付新規）
-
-只看跟「在德國想買房/有房/租房的人」會關心的程度，不評文章品質。"""
+  "relevance_to_buyer": <0-10 整數>
+}"""
 
 
 def _build_user_prompt(item):
+    """Build the per-item user prompt from the news item.
+
+    Priority order for content (most authoritative first):
+      1. full_text — fetched from the article URL by rss_fetch.fetch_full_text
+         (typically 2,000-16,000 chars; the actual article body).
+      2. content_html (RSS content:encoded, stripped) — RSS inlined HTML.
+      3. summary (RSS short description) — fallback.
+      4. title only — last resort.
+
+    The summary returned to the vault must be derived from the actual article
+    body. The LLM is not allowed to inject external knowledge or speculation.
+    """
+    import re as _re
+    body_text = (item.get("full_text") or "").strip()
+    if not body_text:
+        raw = item.get("content_html") or ""
+        body_text = _re.sub(r"<[^>]+>", " ", raw)
+        body_text = _re.sub(r"\s+", " ", body_text).strip()
+    if not body_text:
+        body_text = (item.get("summary") or "").strip()
+    if not body_text:
+        body_text = (item.get("title") or "").strip()
+    # Cap to keep prompt size reasonable (~4k chars ≈ 1k tokens)
+    body_text = body_text[:4000]
+    # Annotate the source so the LLM knows the basis for the summary.
+    has_full = bool(item.get("full_text"))
+    source_label = "已抓取網頁全文" if has_full else "僅有 RSS 摘要（可能不完整）"
+    body_chars = len(item.get("full_text") or item.get("content_html") or item.get("summary") or "")
     return f"""新聞：
 標題：{item.get('title', '')}
 來源：{item.get('source_name', '')}
 URL：{item.get('url', '')}
-摘要：{item.get('summary', '')[:400]}
+日期：{item.get('pub_date', '')}
+內文長度：{body_chars} 字（{source_label}）
+
+=== 內文（請務必根據此內文摘要，禁止使用未在此提供的背景知識）===
+{body_text}
+=== 內文結束 ===
 
 請輸出 JSON。"""
 
 
 def _apply_parsed(item, parsed, elapsed=None, usage=None):
-    item["title_zh"] = parsed.get("title_zh", "")
-    item["summary_zh"] = parsed.get("summary_zh", "")
+    title_zh = parsed.get("title_zh", "")
+    summary_zh = parsed.get("summary_zh", "")
+    # L1: Auto-convert simplified → Traditional (defense in depth).
+    title_zh, t_repl = force_traditional(title_zh)
+    summary_zh, s_repl = force_traditional(summary_zh)
+    item["title_zh"] = title_zh
+    item["summary_zh"] = summary_zh
+    item["traditional_replacements"] = t_repl + s_repl
+    if t_repl + s_repl:
+        item["had_simplified"] = True
     item["entities"] = parsed.get("entities", {})
     item["tags"] = parsed.get("tags", [])
-    item["relevance_to_buyer"] = parsed.get("relevance_to_buyer")  # 0-10 or None
+    item["relevance_to_buyer"] = parsed.get("relevance_to_buyer")
     if elapsed is not None:
         item["llm_elapsed"] = round(elapsed, 1)
     if usage:
         item["llm_tokens"] = usage.get("total_tokens")
+    # L2: Run the full validation gate (covers all SYSTEM-prompt rules).
+    issues = validate_zh_item(item)
+    item["validation_issues"] = issues
+    if issues:
+        # Surface warnings immediately; errors are surfaced at the obsidian gate.
+        for rule, sev, msg in issues:
+            if sev == "warn":
+                print(f"[validate] {item.get('source_name','?')} {rule}: {msg}", file=sys.stderr)
+    return item
 
 
 # --------------------------------------------------------------------------- #
@@ -229,20 +456,51 @@ def _mark_error(item, err):
 
 
 def analyze_item(item):
-    """Translate+analyze a single news item. Returns the item dict augmented with zh fields."""
+    """Translate+analyze a single news item. Returns the item dict augmented with zh fields.
+
+    Retries up to _MAX_VALIDATION_RETRIES times when the LLM output fails any
+    error-level validation rule (simplified Chinese, summary too short, tags
+    missing, etc.). Each retry adds a correction hint to the user prompt so
+    the LLM is told specifically what to fix.
+    """
     messages = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": _build_user_prompt(item)},
     ]
     t = time.time()
-    try:
-        with _Cooldown():
-            parsed, usage = call_json(messages)
+    attempts = 0
+    last_err = None
+    while attempts <= _MAX_VALIDATION_RETRIES:
+        attempts += 1
+        try:
+            with _Cooldown():
+                parsed, usage = call_json(messages)
+        except LLMError as e:
+            last_err = e
+            if attempts > _MAX_VALIDATION_RETRIES:
+                _mark_error(item, e)
+                return item
+            continue  # network/json error → retry the same messages
+        except Exception as e:
+            last_err = e
+            _mark_error(item, e)
+            return item
         _apply_parsed(item, parsed, elapsed=time.time() - t, usage=usage)
-    except LLMError as e:
-        _mark_error(item, e)
-    except Exception as e:
-        _mark_error(item, e)
+        # Check validation
+        errors = [i for i in item.get("validation_issues", []) if i[1] == "error"]
+        if not errors:
+            return item  # success
+        if attempts > _MAX_VALIDATION_RETRIES:
+            item["llm_validation_failed"] = [r for r, _s, _m in errors]
+            return item  # give up; mark failed
+        # Retry: append a correction hint to the user prompt and re-call.
+        hints = "\n".join(f"- 修補: {msg}" for _r, _s, msg in errors)
+        retry_messages = list(messages) + [
+            {"role": "user", "content": f"你的上一次輸出不符合以下規則，請重新生成完整 JSON 並修正：\n{hints}"},
+        ]
+        messages = retry_messages
+    if last_err is not None:
+        _mark_error(item, last_err)
     return item
 
 
@@ -335,6 +593,13 @@ def _process_chunk_with_fallback(chunk):
         return
     for it, p in zip(chunk, parsed):
         _apply_parsed(it, p, usage=usage)
+    # Validation retry: any item with error-level issues gets re-analyzed
+    # individually with a correction hint. Per-item analyze_item handles the
+    # retry loop with the LLM.
+    bad = [it for it in chunk
+           if any(sev == "error" for _r, sev, _m in it.get("validation_issues", []))]
+    for it in bad:
+        analyze_item(it)
 
 
 def analyze_items_batch(items, chunk_size=8):
