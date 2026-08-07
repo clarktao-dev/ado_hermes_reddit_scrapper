@@ -53,6 +53,13 @@ def write_news_item(item, vault_root, date_str, strict_traditional=True):
     # Gate: run every SYSTEM-prompt rule. Reject if any error-level fails.
     _validate_against_system_prompt(item, strict=strict_traditional)
 
+    # SKILL MODE (2026-08-07): no force_traditional fallback here. The LLM is
+    # responsible for emitting Taiwan Traditional Chinese directly (constrained
+    # by the SYSTEM prompt + temperature=0.1). If a simplified character
+    # sneaks through, validate_zh_item() above will catch it via has_simplified
+    # and raise, prompting re-translation. See batch-llm-translate-short-items
+    # skill: rely on prompt discipline, not post-hoc patching.
+
     out_dir = os.path.join(vault_root, "Daily", date_str)
     # NOTE: We do NOT wipe the daily folder here — that would destroy items
     # written by previous calls in the same run. The wipe is done ONCE by

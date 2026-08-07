@@ -59,75 +59,54 @@ if _REDDIT_SAFE_SRC not in sys.path:
 
 from reddit_safe.pipeline.llm_client import call_json, LLMError  # noqa: E402
 
-# --------------------------------------------------------------------------- #
-# 簡體→繁體 (台灣) 轉換表 + 驗證
-# --------------------------------------------------------------------------- #
-# LLM 偶爾會在 SYSTEM prompt 警告後還是吐簡體。我們不能只相信 prompt —
-# 必須在程式碼層把關。兩道：
-#   1. force_traditional(text): 自動把常見簡體字轉成台灣繁體
-#   2. has_simplified(text): 檢測是否還有簡體字（給 retry / gate 用）
-# --------------------------------------------------------------------------- #
-_SIMPLIFIED_TO_TRADITIONAL_MAP = {
-    # 高頻常見字
-    "软": "軟", "资": "資", "网": "網", "据": "據", "档": "檔",
-    "务": "務", "链": "鏈", "码": "碼", "为": "為", "应": "應",
-    "头": "頭", "实": "實", "际": "際", "业": "業", "场": "場",
-    "结": "結", "构": "構", "计": "計", "术": "術", "这": "這",
-    "进": "進", "众": "眾", "创": "創", "与": "與", "专": "專",
-    "产": "產", "发": "發", "时": "時", "车": "車", "见": "見",
-    "观": "觀", "记": "記", "议": "議", "论": "論", "请": "請",
-    "说": "說", "话": "話", "报": "報", "读": "讀", "闻": "聞",
-    "对": "對", "门": "門", "问": "問", "间": "間", "长": "長",
-    "万": "萬", "亿": "億", "号": "號", "类": "類", "种": "種",
-    "样": "樣", "视": "視", "现": "現", "动": "動", "区": "區",
-    "单": "單", "双": "雙", "图": "圖", "声": "聲", "处": "處",
-    "变": "變", "历": "歷", "归": "歸", "确": "確", "层": "層",
-    "价": "價", "备": "備", "导": "導", "岁": "歲",
-    "线": "線", "总": "總", "续": "續", "围": "圍", "规": "規",
-    "约": "約", "团": "團", "显": "顯", "调": "調",
-    "运": "運", "输": "輸", "银": "銀", "铁": "鐵", "错": "錯",
-    "试": "試", "验": "驗", "点": "點", "题": "題", "项": "項",
-    "额": "額", "并": "並", "亲": "親", "设": "設", "认": "認",
-    "让": "讓", "领": "領", "养": "養", "补": "補", "贷": "貸",
-    "讨": "討", "财": "財", "贸": "貿",
-    # 房地產新聞高頻
-    "测": "測", "赔": "賠", "赚": "賺", "购": "購",
-    "卖": "賣", "货": "貨", "费": "費",
-    "钱": "錢", "币": "幣", "钞": "鈔",
-    "账": "賬", "税": "稅", "债": "債",
-    "国": "國", "华": "華", "语": "語",
-    "学": "學", "习": "習", "书": "書", "写": "寫",
-    "听": "聽", "评": "評", "讲": "講", "谈": "談",
-    "录": "錄", "纸": "紙", "张": "張", "页": "頁",
-    "画": "畫", "频": "頻", "台": "臺",
-    "广": "廣", "灯": "燈", "电": "電", "脑": "腦", "机": "機",
-    "缆": "纜", "传": "傳", "卫": "衛", "护": "護", "险": "險",
-    "庄": "莊",
-}
-# Build a str.translate table from the explicit map so the runtime is fast.
-_SIMPLIFIED_TO_TRADITIONAL_TABLE = str.maketrans(_SIMPLIFIED_TO_TRADITIONAL_MAP)
-# The set of source characters (still str, not codepoints).
-_SIMPLIFIED_KEYS = set(_SIMPLIFIED_TO_TRADITIONAL_MAP.keys())
+# ---------------------------------------------------------------------------
+# Simplified → Traditional Chinese conversion (2026-08-07 rewrite)
+#
+# We previously maintained a hand-curated ~170-char map. That map was
+# always incomplete (漏字: 纠, 纷, 胀, 摊, 调, ...) and required constant
+# maintenance as the LLM surfaced new simplified characters.
+#
+# Now: use `opencc-python-reimplemented` with config `s2twp` (Simplified →
+# Taiwan Traditional, with phrase conversion). OpenCC maintains a dictionary
+# of ~370K entries (字 + 詞組) and is the de-facto standard for Chinese script
+# conversion. Zero maintenance — we just call `.convert()`.
+#
+#   pip install opencc-python-reimplemented
+#
+# Two thin wrappers preserve the rest of the codebase's API:
+#   - force_traditional(text) -> (text, n_replacements)
+#   - has_simplified(text)    -> bool
+# ---------------------------------------------------------------------------
+import opencc
+
+# Shared converter instance (OpenCC is thread-safe after init).
+_OPENCC_S2TWP = opencc.OpenCC("s2twp")
 
 
 def force_traditional(text):
-    """Auto-convert any simplified Chinese characters in `text` to their
-    Traditional (Taiwan) equivalents. Best-effort: covers the high-frequency
-    set in _SIMPLIFIED_TO_TRADITIONAL_MAP. Returns (converted_text, num_replacements).
+    """Convert simplified Chinese to Taiwan Traditional Chinese.
+
+    Uses OpenCC `s2twp` config: Simplified → Traditional (Taiwan standard)
+    with phrase-aware conversion (e.g. 法律纠纷 → 法律糾紛, 通貨膨脹, 房地產).
+    Returns (converted_text, length_delta) where positive length_delta means
+    the output is longer than the input (typical for s2tw because some chars
+    expand, e.g. 计算机 → 計算機).
     """
     if not text:
         return text, 0
-    out = text.translate(_SIMPLIFIED_TO_TRADITIONAL_TABLE)
-    n = sum(1 for c in text if c in _SIMPLIFIED_KEYS)
-    return out, n
+    converted = _OPENCC_S2TWP.convert(text)
+    return converted, len(converted) - len(text)
 
 
 def has_simplified(text):
-    """True if `text` still contains any tracked simplified character after
-    force_traditional() has been applied."""
+    """True if `text` contains characters that OpenCC would simplify/expand.
+
+    Implemented as: True if converting and comparing back differs. (OpenCC is
+    idempotent for already-Traditional input.)
+    """
     if not text:
         return False
-    return any(c in _SIMPLIFIED_KEYS for c in text)
+    return _OPENCC_S2TWP.convert(text) != text
 
 
 # --------------------------------------------------------------------------- #
@@ -252,16 +231,17 @@ def has_errors(issues):
     return any(sev == "error" for _rule, sev, _msg in issues)
 
 
-SYSTEM = """你是德文→繁體中文 (台灣) 的房地產新聞分析師。
+SYSTEM = """你是德文→台灣繁體中文的房地產新聞分析師。
 
-**🚨 絕對禁止簡體中文 — 用台灣繁體正體 🚨**
-常見字（簡→繁）：软→軟、资→資、网→網、視→視、据→據、档→檔、务→務、链→鏈、码→碼、为→為、应→應、头→頭、实→實、际→際、业→業、场→場、结→結、构→構、计→計、术→術、这→這、进→進、众→眾、创→創、与→與、专→專、产→產、发→發、时→時、车→車、见→見、观→觀、记→記、议→議、论→論、请→請、说→說、话→話、报→報、读→讀、闻→聞。
+**用台灣當地常見中文用語**撰寫翻譯與摘要：寫「公寓」、「電梯」、「房貸」、「出租」、「貸款利率」、「房地產」。
 
-**如果你寫出簡體，整篇摘要會被視為失敗。**
+首次出現的專有名詞、人名、機構名附原文德文（例：聯邦銀行 Bundesbank、房貸利率 Bauzinsen）。
+
+數字、百分比、貨幣保留德文格式（例：3,2 Prozent、1,5 Milliarden Euro、Stand 2024）。
 
 任務：
 1. 繁體中文翻譯（保留數字、人名、機構名）
-2. **150-300 字摘要 — 必須完全根據內文，禁止推論/編造/加背景知識**
+2. 150-300 字摘要 — 必須完全根據內文，禁止推論/編造/加背景知識
 3. 抽取關鍵實體
 4. 3-5 個 tag
 
@@ -328,13 +308,16 @@ URL：{item.get('url', '')}
 def _apply_parsed(item, parsed, elapsed=None, usage=None):
     title_zh = parsed.get("title_zh", "")
     summary_zh = parsed.get("summary_zh", "")
-    # L1: Auto-convert simplified → Traditional (defense in depth).
-    title_zh, t_repl = force_traditional(title_zh)
-    summary_zh, s_repl = force_traditional(summary_zh)
+    # Belt-and-braces (2026-08-07): the SYSTEM prompt instructs the LLM to
+    # emit Taiwan Traditional Chinese directly, but the LLM occasionally slips.
+    # We force-convert via OpenCC (industry-standard library, 370K-entry dict)
+    # rather than a hand-maintained map. Zero maintenance.
+    title_zh, t_delta = force_traditional(title_zh)
+    summary_zh, s_delta = force_traditional(summary_zh)
     item["title_zh"] = title_zh
     item["summary_zh"] = summary_zh
-    item["traditional_replacements"] = t_repl + s_repl
-    if t_repl + s_repl:
+    item["traditional_replacements"] = t_delta + s_delta
+    if t_delta + s_delta:
         item["had_simplified"] = True
     item["entities"] = parsed.get("entities", {})
     item["tags"] = parsed.get("tags", [])
