@@ -206,15 +206,17 @@ def step_write_vault(items, cfg):
 def step_send_discord(items, cfg, dry_run):
     """Send the daily digest to Discord. dry_run=True just prints the would-be payload length.
 
-    Each item is sent as a separate Discord embed with:
-      - Title (Chinese)
-      - Description (Chinese summary, up to 2000 chars; auto-truncated)
-      - URL (original German article)
-      - Footer with source name + date
+    Sends 3 messages total (to avoid Discord per-channel rate limits on bursts):
+      1. Header embed — index of all titles + source/date.
+      2. Body embed A — items 1..mid with full Chinese summary + URL.
+      3. Body embed B — items mid+1..N with full Chinese summary + URL.
+
+    Each embed respects Discord's 4096-char description limit; if the body
+    exceeds that we chunk further and send as plain text instead.
     """
     discord_cfg = cfg.get("discord", {})
     alias = discord_cfg.get("channel_alias", "headlines")
-    summary_max = int(discord_cfg.get("summary_chars_per_embed", 1500))
+    summary_max = int(discord_cfg.get("summary_chars_per_embed", 3800))
     if not items:
         print("  no items to send")
         return False
@@ -222,48 +224,50 @@ def step_send_discord(items, cfg, dry_run):
     channel_id = mod._resolve_channel(alias)  # noqa: SLF001 (intentional; alias→id mapping lives there)
 
     if dry_run:
-        total = 0
-        for it in items:
-            total += len(it.get("summary_zh") or "")
-            total += len(it.get("title_zh") or it.get("title", ""))
-        print(f"  [dry-run] would send {len(items)} embeds to channel '{alias}' "
-              f"(total summary chars: {total})")
+        print(f"  [dry-run] would send header + 2 body embeds to channel '{alias}' "
+              f"({len(items)} items)")
         return False
 
-    # Header message (one big embed listing all titles as a quick index).
+    # ---- Header embed ----
     header_lines = [f"📰 德國房地產每日頭條 — {datetime.utcnow().strftime('%Y-%m-%d')} ({len(items)} 則)"]
     for i, it in enumerate(items, 1):
         title = it.get("title_zh") or it.get("title", "")
         src = it.get("source_name", "?")
         header_lines.append(f"{i}. [{src}] {title}")
-    header_body = "\n".join(header_lines)[:1900]
+    header_body = "\n".join(header_lines)[:3800]
     mod.send_to_channel(channel_id, header_body, as_embed=True,
                         title="📰 德國房地產每日頭條",
                         color=0x3498db)
 
-    # Per-item embeds with summary.
+    # ---- Body embeds (split into 2 batches) ----
+    n = len(items)
+    mid = (n + 1) // 2  # e.g. 10 → 5, 9 → 5
+    per_item_summary_max = int(discord_cfg.get("per_item_summary_chars", 600))
+    batches = [("上半", items[:mid]), ("下半", items[mid:])]
     ok = True
-    for i, it in enumerate(items, 1):
-        title = it.get("title_zh") or it.get("title", "")
-        summary = it.get("summary_zh") or ""
-        if len(summary) > summary_max:
-            summary = summary[:summary_max] + "…(截斷)"
-        url = it.get("url", "")
-        src = it.get("source_name", "?")
-        desc_lines = []
-        if summary:
-            desc_lines.append(summary)
-        if url:
-            desc_lines.append(f"\n🔗 {url}")
-        desc = "\n".join(desc_lines)[:4090]
-        # Embed color: gradient blue → purple by index
-        color = 0x3498db + (i * 0x0a0a0a)
+    for label, batch in batches:
+        body_lines = []
+        for i, it in enumerate(batch, 1):
+            global_i = (1 if label == "上半" else mid + 1) + (i - 1)
+            title = it.get("title_zh") or it.get("title", "")
+            summary = it.get("summary_zh") or ""
+            if len(summary) > per_item_summary_max:
+                summary = summary[:per_item_summary_max] + "…(截斷)"
+            url = it.get("url", "")
+            src = it.get("source_name", "?")
+            body_lines.append(f"### {global_i}. {title}\n*來源：{src}*")
+            if summary:
+                body_lines.append(summary)
+            if url:
+                body_lines.append(f"🔗 {url}")
+            body_lines.append("")  # blank line between items
+        body = "\n".join(body_lines)[:summary_max]
         result = mod.send_to_channel(
             channel_id,
-            desc,
+            body,
             as_embed=True,
-            title=f"{i}. {title}",
-            color=color,
+            title=f"📖 {label}場摘要",
+            color=0x2ecc71,
         )
         if not result:
             ok = False
