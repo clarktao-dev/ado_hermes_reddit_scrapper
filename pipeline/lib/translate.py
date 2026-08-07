@@ -386,7 +386,8 @@ def quick_score_items(items, min_score=6, chunk_size=12):
     total = len(items)
     if total == 0:
         return out
-    for start in range(0, total, chunk_size):
+    chunk_count = (total + chunk_size - 1) // chunk_size
+    for chunk_idx, start in enumerate(range(0, total, chunk_size)):
         chunk = items[start:start + chunk_size]
         messages = _build_quick_score_messages(chunk)
         try:
@@ -409,6 +410,10 @@ def quick_score_items(items, min_score=6, chunk_size=12):
             except (TypeError, ValueError):
                 it["quick_score"] = None
         out.extend(chunk)
+        # Inter-chunk cooldown (2026-08-07): same reasoning as
+        # analyze_items_batch — ollama-cloud queues and hangs on bursts.
+        if chunk_idx < chunk_count - 1:
+            time.sleep(2.0)  # quick_score is small, lighter sleep
     return out
 
 
@@ -597,10 +602,20 @@ def analyze_items_batch(items, chunk_size=8):
     if total == 0:
         return out
     t0 = time.time()
-    for start in range(0, total, chunk_size):
+    # Inter-chunk cooldown (2026-08-07): ollama-cloud queues sequential
+    # requests and silently drops them when the queue backs up. We sleep
+    # briefly between chunks so the backend can drain before we fire the
+    # next one. Without this, chunk_size=4 with retry can produce 11+
+    # back-to-back LLM calls that hang indefinitely.
+    chunk_count = (total + chunk_size - 1) // chunk_size
+    for chunk_idx, start in enumerate(range(0, total, chunk_size)):
         chunk = items[start:start + chunk_size]
         _process_chunk_with_fallback(chunk)
         out.extend(chunk)
+        # Sleep between chunks (but not after the last one — no point).
+        if chunk_idx < chunk_count - 1:
+            _CHUNK_COOLDOWN_S = 3.0
+            time.sleep(_CHUNK_COOLDOWN_S)
     for it in out:
         it.setdefault("llm_elapsed_batch_total", round(time.time() - t0, 1))
     return out

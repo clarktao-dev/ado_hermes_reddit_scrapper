@@ -90,8 +90,25 @@ def step_fetch_full_text(items, delay_sec=1.0):
     return rss_fetch.fetch_full_text_for_items(items, delay_sec=delay_sec)
 
 
-def step_translate(items, chunk_size=8):
-    return translate.analyze_items_batch(items, chunk_size=chunk_size)
+def step_translate(items, chunk_size=2):
+    """Translate+analyze each item.
+
+    Per-item mode (2026-08-07): chunked batch (chunk_size=2/4/8) keeps hanging
+    on ollama-cloud — large prompts (~10K+ tokens for 5K-char full_text × 2)
+    cause the backend to silently drop requests after the first batch. Per-item
+    calls keep each prompt under 5K tokens and have been verified to return
+    reliably. The inter-item 3s cooldown prevents sequential LLM queue buildup.
+
+    The `chunk_size` parameter is kept for CLI compatibility but ignored.
+    """
+    import time as _time
+    out = []
+    for i, it in enumerate(items):
+        result = translate.analyze_item(it)
+        out.append(result if isinstance(result, dict) else it)
+        if i < len(items) - 1:
+            _time.sleep(3.0)  # per-item cooldown
+    return out
 
 
 def step_rank(items):
@@ -421,10 +438,11 @@ def main():
                    help="Run steps 1-6 only (no vault / discord / github side effects).")
     p.add_argument("--limit", type=int, default=None,
                    help="Limit the number of RSS sources fetched (for testing).")
-    p.add_argument("--chunk-size", type=int, default=4,
-                   help="Batch size for the LLM translation step. chunk=4 avoids "
-                        "ollama-cloud hangs that happen with chunk=8 after ~7 sequential "
-                        "requests; slower per-batch but reliable.")
+    p.add_argument("--chunk-size", type=int, default=2,
+                   help="Batch size for the LLM translation step. chunk=2 keeps each "
+                        "prompt small (~10K tokens total for 5K-char full_text × 2) "
+                        "which avoids ollama-cloud hangs. chunk=4/8 produced prompts "
+                        "large enough to silently hang. Slower per-batch but reliable.")
     p.add_argument("--max-days", type=int, default=3,
                    help="Only include items published within the last N days. "
                         "0 disables age filtering.")
