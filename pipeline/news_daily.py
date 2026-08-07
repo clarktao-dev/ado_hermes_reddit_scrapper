@@ -204,29 +204,70 @@ def step_write_vault(items, cfg):
 
 
 def step_send_discord(items, cfg, dry_run):
-    """Send the daily digest to Discord. dry_run=True just prints the would-be payload length."""
+    """Send the daily digest to Discord. dry_run=True just prints the would-be payload length.
+
+    Each item is sent as a separate Discord embed with:
+      - Title (Chinese)
+      - Description (Chinese summary, up to 2000 chars; auto-truncated)
+      - URL (original German article)
+      - Footer with source name + date
+    """
     discord_cfg = cfg.get("discord", {})
     alias = discord_cfg.get("channel_alias", "headlines")
-    max_chars = int(discord_cfg.get("max_chars_per_message", 1900))
+    summary_max = int(discord_cfg.get("summary_chars_per_embed", 1500))
     if not items:
         print("  no items to send")
         return False
-    # Build a short text digest (top N items, title_zh + URL).
-    lines = [f"📰 德國房地產每日頭條 — {datetime.utcnow().strftime('%Y-%m-%d')} ({len(items)} 則)"]
+    mod = _import_discord()
+    channel_id = mod._resolve_channel(alias)  # noqa: SLF001 (intentional; alias→id mapping lives there)
+
+    if dry_run:
+        total = 0
+        for it in items:
+            total += len(it.get("summary_zh") or "")
+            total += len(it.get("title_zh") or it.get("title", ""))
+        print(f"  [dry-run] would send {len(items)} embeds to channel '{alias}' "
+              f"(total summary chars: {total})")
+        return False
+
+    # Header message (one big embed listing all titles as a quick index).
+    header_lines = [f"📰 德國房地產每日頭條 — {datetime.utcnow().strftime('%Y-%m-%d')} ({len(items)} 則)"]
     for i, it in enumerate(items, 1):
         title = it.get("title_zh") or it.get("title", "")
+        src = it.get("source_name", "?")
+        header_lines.append(f"{i}. [{src}] {title}")
+    header_body = "\n".join(header_lines)[:1900]
+    mod.send_to_channel(channel_id, header_body, as_embed=True,
+                        title="📰 德國房地產每日頭條",
+                        color=0x3498db)
+
+    # Per-item embeds with summary.
+    ok = True
+    for i, it in enumerate(items, 1):
+        title = it.get("title_zh") or it.get("title", "")
+        summary = it.get("summary_zh") or ""
+        if len(summary) > summary_max:
+            summary = summary[:summary_max] + "…(截斷)"
         url = it.get("url", "")
-        lines.append(f"{i}. {title}\n   {url}")
-    body = "\n".join(lines)
-    if len(body) > max_chars:
-        body = body[: max_chars - 30] + "\n…(截斷)"
-    if dry_run:
-        print(f"  [dry-run] would send {len(body)} chars to channel '{alias}'")
-        return False
-    mod = _import_discord()
-    # Resolve alias to a channel id via the sender's own helper.
-    channel_id = mod._resolve_channel(alias)  # noqa: SLF001 (intentional; alias→id mapping lives there)
-    return mod.send_to_channel(channel_id, body)
+        src = it.get("source_name", "?")
+        desc_lines = []
+        if summary:
+            desc_lines.append(summary)
+        if url:
+            desc_lines.append(f"\n🔗 {url}")
+        desc = "\n".join(desc_lines)[:4090]
+        # Embed color: gradient blue → purple by index
+        color = 0x3498db + (i * 0x0a0a0a)
+        result = mod.send_to_channel(
+            channel_id,
+            desc,
+            as_embed=True,
+            title=f"{i}. {title}",
+            color=color,
+        )
+        if not result:
+            ok = False
+    return ok
 
 
 def step_push_github(dry_run):
