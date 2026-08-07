@@ -9,7 +9,21 @@
     "Wärmepumpe", "Sanierung", "Neubau", "Bestandsbau", "Bauordnung",
     "Bebauungsplan", "Denkmalschutz", "Erbpacht", "Zwangsversteigerung",
     "BauGB", "WEG", "Mietrecht", "Mietpreisbremse", "Wohnungsmarkt",
-    "Baufinanzierung", "Baudarlehen", "Annuität", "Tilgung"
+    "Baufinanzierung", "Baudarlehen", "Annuität", "Tilgung",
+    "Wirtschaft", "Finanzen", "Bank", "Bundesbank", "EZB",
+    "Zins", "Leitzins", "Inflation", "Konjunktur", "Konjunkturprognose",
+    "Wohnungsbau", "Wohnungsbaupolitik", "Wohnungspolitik",
+    "Baubranche", "Bauwirtschaft", "Baugewerbe", "Bauindustrie",
+    "Bundesregierung", "Bauministerium", "Mietenstopp", "Mietendeckel",
+    "Wohngipfel", "Bauantrag", "Bauüberhang", "Wohnungsnot",
+    "Mietwohnung", "Mietmarkt", "Eigentumswohnung", "Hauskauf",
+    "Baukredit", "Baudarlehen", "Anschlussfinanzierung",
+    "Bausparkasse", "Bausparen", "Forward-Darlehen",
+    "Sicherheit", "Garantie", "Einlagensicherung", "BaFin",
+    "Börse", "Aktien", "DAX", "EZB-Rat", "EZB-Präsidentin", "EZB-Präsident",
+    "Zinserhöhung", "Zinssenkung", "Zinswende", "Geldpolitik",
+    "Bundesanleihen", "Rendite", "Staatsanleihen", "Anleihe",
+    "Hypothekenzinsen", "Bauzins", "Effektivzins"
   ],
   "exclude": [
     "Stellenanzeige", "Stellenangebot", "Werbe", "Sponsored", "Anzeige",

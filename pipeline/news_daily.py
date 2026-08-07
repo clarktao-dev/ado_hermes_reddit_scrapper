@@ -11,7 +11,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 # Ensure the pipeline package is importable when invoked as a script.
 _PIPELINE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -88,6 +88,82 @@ def step_rank(items):
     return translate.rank_by_relevance(items)
 
 
+# --------------------------------------------------------------------------- #
+# Source quota + date filter
+# --------------------------------------------------------------------------- #
+
+# Per-source cap. Handelsblatt is the specialist real-estate feed → higher
+# quota; other Wirtschaft feeds → lower. Configurable via CLI.
+_DEFAULT_QUOTAS = {
+    "Handelsblatt Immobilien": 8,
+}
+_DEFAULT_OTHER_QUOTA = 3
+
+
+def filter_by_age(items, max_days):
+    """Keep only items whose pub_date is within the last `max_days` days.
+    Items with no pub_date are kept (assumed recent)."""
+    if max_days is None or max_days <= 0:
+        return items
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_days)
+    out = []
+    for it in items:
+        pub = it.get("pub_date")
+        if pub is None:
+            out.append(it)  # no date → keep
+            continue
+        if isinstance(pub, str):
+            # parse ISO string
+            try:
+                pub = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+            except Exception:
+                out.append(it)
+                continue
+        if pub.tzinfo is None:
+            pub = pub.replace(tzinfo=timezone.utc)
+        if pub >= cutoff:
+            out.append(it)
+    return out
+
+
+def apply_source_quota(items, primary_max=8, other_max=3):
+    """Cap items per source. `primary_max` applies to known primary sources
+    (Handelsblatt Immobilien), `other_max` to everything else. Preserves
+    rank order within each source.
+    """
+    if not items:
+        return items
+    buckets: dict[str, list] = {}
+    for it in items:
+        buckets.setdefault(it.get("source_name", "?"), []).append(it)
+    out = []
+    for src, src_items in buckets.items():
+        cap = primary_max if src in _DEFAULT_QUOTAS else other_max
+        out.extend(src_items[:cap])
+    return out
+
+
+def filter_by_relevance(items, min_score=5):
+    """Drop items whose LLM-assigned relevance_to_buyer is below min_score.
+
+    Items without a relevance score (None) are kept (safer default).
+    """
+    if not items or min_score is None or min_score <= 0:
+        return items
+    out = []
+    for it in items:
+        score = it.get("relevance_to_buyer")
+        if score is None:
+            out.append(it)  # no score → keep
+            continue
+        try:
+            if int(score) >= min_score:
+                out.append(it)
+        except (TypeError, ValueError):
+            out.append(it)
+    return out
+
+
 def step_write_vault(items, cfg):
     """Write each item as a markdown file + the daily index file."""
     vault_cfg = cfg.get("vault", {})
@@ -146,7 +222,9 @@ def step_push_github(dry_run):
 # Main orchestration.
 # --------------------------------------------------------------------------- #
 
-def run_pipeline(dry_run=False, source_limit=None, chunk_size=8):
+def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
+                 max_days=3, quota_primary=8, quota_other=3,
+                 min_relevance=5, min_quick_score=6):
     t_start = time.time()
     print(f"[news_daily] starting at {datetime.utcnow().isoformat()}Z "
           f"(dry_run={dry_run}, source_limit={source_limit})")
@@ -171,18 +249,47 @@ def run_pipeline(dry_run=False, source_limit=None, chunk_size=8):
     # Step 3: filter
     items = _step("3. filter_keywords", lambda: step_filter(items)) or []
 
+    # Step 3b: quick relevance score (title-only, cheap LLM pre-filter)
+    if min_quick_score is not None and min_quick_score > 0:
+        def _do_quick():
+            translate.quick_score_items(items, min_score=min_quick_score, chunk_size=12)
+            return [it for it in items if it.get("quick_score") is None or it.get("quick_score", 0) >= min_quick_score]
+        before = len(items)
+        result = _step("3b. quick_score", _do_quick)
+        items = result if result is not None else []
+        print(f"  quick filter (≥ {min_quick_score}/10): {before} → {len(items)} items", flush=True)
+
     # Step 4: dedup
     items = _step("4. dedup_cross_source", lambda: step_dedup(items)) or []
+
+    # Step 4b: age filter (keep only items within max_days)
+    if max_days is not None and max_days > 0:
+        before = len(items)
+        items = filter_by_age(items, max_days)
+        print(f"  age filter (≤ {max_days}d): {before} → {len(items)} items", flush=True)
 
     # Step 5: translate (batched LLM)
     items = _step("5. translate_batch",
                   lambda: step_translate(items, chunk_size=chunk_size)) or []
+
+    # Step 5b: relevance filter (drop low LLM-scored items)
+    if min_relevance is not None and min_relevance > 0:
+        before = len(items)
+        items = filter_by_relevance(items, min_score=min_relevance)
+        print(f"  relevance filter (≥ {min_relevance}/10): {before} → {len(items)} items", flush=True)
 
     # Step 6: rank
     items = _step("6. rank_by_relevance", lambda: step_rank(items)) or []
     # Tag each item with its position so obsidian frontmatter knows the rank.
     for i, it in enumerate(items):
         it["relevance_rank"] = i + 1
+
+    # Step 6b: apply source quota (per-source cap)
+    if quota_primary > 0 and quota_other > 0:
+        before = len(items)
+        items = apply_source_quota(items, primary_max=quota_primary, other_max=quota_other)
+        if len(items) < before:
+            print(f"  source quota (primary ≤ {quota_primary}, other ≤ {quota_other}): {before} → {len(items)} items", flush=True)
 
     # Print a dry-run summary so --dry-run is verifiable without side effects.
     if dry_run:
@@ -216,11 +323,30 @@ def main():
                    help="Limit the number of RSS sources fetched (for testing).")
     p.add_argument("--chunk-size", type=int, default=8,
                    help="Batch size for the LLM translation step.")
+    p.add_argument("--max-days", type=int, default=3,
+                   help="Only include items published within the last N days. "
+                        "0 disables age filtering.")
+    p.add_argument("--quota-primary", type=int, default=8,
+                   help="Max items per run from primary source (Handelsblatt). "
+                        "0 disables source quota.")
+    p.add_argument("--quota-other", type=int, default=3,
+                   help="Max items per run from each other source.")
+    p.add_argument("--min-relevance", type=int, default=5,
+                   help="Drop items whose LLM-assigned relevance_to_buyer is "
+                        "below this score (0-10). 0 disables the filter.")
+    p.add_argument("--min-quick-score", type=int, default=6,
+                   help="Title-only pre-filter (cheaper than --min-relevance). "
+                        "Drops items whose quick_score is below this. 0 disables.")
     args = p.parse_args()
     return run_pipeline(
         dry_run=args.dry_run,
         source_limit=args.limit,
         chunk_size=args.chunk_size,
+        max_days=args.max_days,
+        quota_primary=args.quota_primary,
+        quota_other=args.quota_other,
+        min_relevance=args.min_relevance,
+        min_quick_score=args.min_quick_score,
     )
 
 
