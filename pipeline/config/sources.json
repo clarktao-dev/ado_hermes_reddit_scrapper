@@ -35,6 +35,13 @@
       "url": "https://newsfeed.zeit.de/wirtschaft/index",
       "enabled": true,
       "priority": 5
+    },
+    {
+      "id": "tagesschau_wirtschaft_finanzen",
+      "name": "Tagesschau Wirtschaft Finanzen",
+      "url": "https://www.tagesschau.de/wirtschaft/finanzen/index~rss2.xml",
+      "enabled": true,
+      "priority": 6
     }
   ]
 }

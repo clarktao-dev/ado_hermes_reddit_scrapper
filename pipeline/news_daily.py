@@ -127,9 +127,19 @@ def filter_by_age(items, max_days):
 
 
 def apply_source_quota(items, primary_max=8, other_max=3):
-    """Cap items per source. `primary_max` applies to known primary sources
-    (Handelsblatt Immobilien), `other_max` to everything else. Preserves
-    rank order within each source.
+    """Cap items per source to prevent any single feed from dominating.
+
+    Rules (per user's 2026-08-07 spec):
+      - "Primary" sources (Handelsblatt Immobilien — specialist feed) cap at
+        `primary_max` items.
+      - All other sources cap at `other_max` items.
+      - No minimum floor: if a source has only 1 quality item, that 1 is kept.
+        The final relevance judgement is left to the LLM (--min-relevance).
+      - Items within each bucket are kept in their incoming (rank) order.
+
+    Edge cases:
+      - `primary_max` / `other_max` <= 0 → disable upper cap for that tier
+        (not recommended: this can let a noisy source flood the digest).
     """
     if not items:
         return items
@@ -138,8 +148,9 @@ def apply_source_quota(items, primary_max=8, other_max=3):
         buckets.setdefault(it.get("source_name", "?"), []).append(it)
     out = []
     for src, src_items in buckets.items():
-        cap = primary_max if src in _DEFAULT_QUOTAS else other_max
-        out.extend(src_items[:cap])
+        upper = primary_max if (src in _DEFAULT_QUOTAS and primary_max > 0) \
+                else (other_max if other_max > 0 else len(src_items))
+        out.extend(src_items[:upper])
     return out
 
 
@@ -284,12 +295,19 @@ def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
     for i, it in enumerate(items):
         it["relevance_rank"] = i + 1
 
-    # Step 6b: apply source quota (per-source cap)
-    if quota_primary > 0 and quota_other > 0:
+    # Step 6b: apply source quota (per-source upper cap; final relevance
+    # judgement is the LLM's --min-relevance, not a forced minimum floor).
+    if quota_primary > 0 or quota_other > 0:
         before = len(items)
-        items = apply_source_quota(items, primary_max=quota_primary, other_max=quota_other)
-        if len(items) < before:
-            print(f"  source quota (primary ≤ {quota_primary}, other ≤ {quota_other}): {before} → {len(items)} items", flush=True)
+        items = apply_source_quota(
+            items,
+            primary_max=quota_primary,
+            other_max=quota_other,
+        )
+        from collections import Counter as _C
+        dist = _C(it.get("source_name", "?") for it in items)
+        print(f"  source quota (primary≤{quota_primary}, other≤{quota_other}): "
+              f"{before} → {len(items)} items | {dict(dist)}", flush=True)
 
     # Print a dry-run summary so --dry-run is verifiable without side effects.
     if dry_run:
