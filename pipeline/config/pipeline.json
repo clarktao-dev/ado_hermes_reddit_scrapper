@@ -17,8 +17,8 @@
     "max_retries": 3
   },
   "vault": {
-    "root": "/root/projects/ado_hermes_reddit_scrapper/immobilien-kb",
-    "news_subdir": "vault/Daily",
-    "youtube_subdir": "vault/YouTube"
+    "root": "/root/projects/ado_hermes_reddit_scrapper/immobilien-kb/vault",
+    "news_subdir": "Daily",
+    "youtube_subdir": "YouTube"
   }
 }
