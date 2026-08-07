@@ -1,0 +1,47 @@
+{
+  "_comment": "German real estate news RSS sources. priority=lower=more authoritative; news_daily.py keeps highest-priority duplicate when dedup triggers.",
+  "sources": [
+    {
+      "id": "handelsblatt_immobilien",
+      "name": "Handelsblatt Immobilien",
+      "url": "https://www.handelsblatt.com/contentexport/feed/immobilien",
+      "enabled": true,
+      "priority": 1
+    },
+    {
+      "id": "faz_immobilien",
+      "name": "FAZ Immobilien",
+      "url": "https://www.faz.net/rss/aktuell/wirtschaft/immobilien/",
+      "enabled": true,
+      "priority": 2
+    },
+    {
+      "id": "spiegel_immobilien",
+      "name": "Spiegel Immobilien",
+      "url": "https://www.spiegel.de/wirtschaft/immobilien/index.rss",
+      "enabled": true,
+      "priority": 3
+    },
+    {
+      "id": "tagesschau_wirtschaft",
+      "name": "Tagesschau Wirtschaft",
+      "url": "https://www.tagesschau.de/wirtschaft/feed/~rss-topstories.xml",
+      "enabled": true,
+      "priority": 4
+    },
+    {
+      "id": "ntv_wirtschaft",
+      "name": "NTV Wirtschaft",
+      "url": "https://www.n-tv.de/wirtschaft/rss",
+      "enabled": true,
+      "priority": 5
+    },
+    {
+      "id": "zeit_wirtschaft",
+      "name": "Zeit Wirtschaft",
+      "url": "https://newsfeed.zeit.de/wirtschaft/index",
+      "enabled": true,
+      "priority": 6
+    }
+  ]
+}

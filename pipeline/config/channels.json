@@ -1,0 +1,66 @@
+{
+  "_comment": "YouTube channels for daily podcast analysis. category used for round-robin scheduling; daily pick rotates across categories.",
+  "channels": [
+    {
+      "id": "finanztip",
+      "name": "Finanztip",
+      "url": "https://www.youtube.com/@finanztip",
+      "category": "general_finance",
+      "enabled": true
+    },
+    {
+      "id": "marktcheck",
+      "name": "Marktcheck",
+      "url": "https://www.youtube.com/@marktcheck",
+      "category": "real_estate",
+      "enabled": true
+    },
+    {
+      "id": "finanzfluss",
+      "name": "Finanzfluss",
+      "url": "https://www.youtube.com/@Finanzfluss",
+      "category": "general_finance",
+      "enabled": true
+    },
+    {
+      "id": "1alage",
+      "name": "1aLAGE Immobilienpodcast",
+      "url": "https://www.youtube.com/@1aLAGE-Immobilienpodcast",
+      "category": "real_estate",
+      "enabled": true
+    },
+    {
+      "id": "lbsnordwest",
+      "name": "LBS Immobilien Nordwest",
+      "url": "https://www.youtube.com/@lbsimmobiliennordwest",
+      "category": "real_estate",
+      "enabled": true
+    },
+    {
+      "id": "ex_makler",
+      "name": "Der Ex-Makler",
+      "url": "https://www.youtube.com/@Der-Ex-Makler",
+      "category": "real_estate",
+      "enabled": true
+    },
+    {
+      "id": "mrsteuer",
+      "name": "Mr. Steuer",
+      "url": "https://www.youtube.com/@mrsteuer",
+      "category": "tax",
+      "enabled": true
+    },
+    {
+      "id": "immocation",
+      "name": "Immocation",
+      "url": "https://www.youtube.com/@immocation",
+      "category": "real_estate",
+      "enabled": true
+    }
+  ],
+  "_scheduling": {
+    "daily_target": 2,
+    "max_per_channel_per_day": 1,
+    "selection": "round-robin starting after last_channel_index; if no new videos, walk backwards through channel playlist"
+  }
+}

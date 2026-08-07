@@ -1,0 +1,123 @@
+"""Obsidian vault writer.
+
+Produces markdown files in vault/Daily/YYYY-MM-DD/ and vault/YouTube/{Channel}/
+with YAML frontmatter so Dataview queries and Obsidian plugins can read them.
+"""
+import os
+from datetime import datetime
+from urllib.parse import urlparse
+
+import re
+
+
+def _slugify(text, max_len=80):
+    """ASCII-safe slug for filenames."""
+    s = re.sub(r"[^a-zA-Z0-9äöüÄÖÜß-]+", "-", text)
+    s = re.sub(r"-+", "-", s).strip("-").lower()
+    return s[:max_len].rstrip("-")
+
+
+def write_news_item(item, vault_root, date_str):
+    """Write a single news item as a markdown file in vault/Daily/{date}/.
+    Returns the absolute path written.
+    """
+    out_dir = os.path.join(vault_root, "Daily", date_str)
+    os.makedirs(out_dir, exist_ok=True)
+
+    src_id = item.get("source_id", "unknown")
+    title_slug = _slugify(item.get("title", "untitled"), max_len=50)
+    fname = f"{src_id}-{title_slug}.md"
+    path = os.path.join(out_dir, fname)
+
+    # YAML frontmatter
+    pub = item.get("pub_date")
+    pub_str = pub.isoformat() if pub else ""
+    tags_yaml = ", ".join(item.get("tags", []))
+    entities = item.get("entities", {}) or {}
+    ent_lines = []
+    for k, vs in entities.items():
+        if vs:
+            ent_lines.append(f"- **{k}**: {', '.join(vs) if isinstance(vs, list) else vs}")
+    ent_block = "\n".join(ent_lines) if ent_lines else "_（無顯著實體）_"
+
+    body = f"""---
+type: news
+source: {item.get('source_name', '')}
+source_id: {src_id}
+url: {item.get('url', '')}
+date: {date_str}
+fetched: {datetime.utcnow().strftime('%Y-%m-%d')}
+title_de: "{item.get('title', '').replace(chr(34), '')}"
+title_zh: "{item.get('title_zh', '').replace(chr(34), '')}"
+tags: [{tags_yaml}]
+priority: {item.get('priority', 99)}
+relevance_rank: {item.get('relevance_rank', 0)}
+---
+
+# {item.get('title', '')}
+
+## 摘要
+
+{item.get('summary_zh', '')}
+
+## 德文原文摘要
+
+> {item.get('summary', '')}
+
+## 關鍵實體
+
+{ent_block}
+
+## 原文連結
+
+{item.get('url', '')}
+"""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(body)
+    return path
+
+
+def write_daily_index(items, vault_root, date_str, github_url):
+    """Write a daily summary file: vault/Daily/YYYY-MM-DD/_index.md
+    This is the file the GitHub push and Discord digest will reference.
+    """
+    out_dir = os.path.join(vault_root, "Daily", date_str)
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "_index.md")
+
+    by_source = {}
+    for it in items:
+        s = it.get("source_name", "?")
+        by_source.setdefault(s, []).append(it)
+
+    body = f"""---
+type: daily_digest
+date: {date_str}
+total_items: {len(items)}
+sources_count: {len(by_source)}
+---
+
+# 德國房地產每日頭條 — {date_str}
+
+共 **{len(items)} 則新聞** | 來源 **{len(by_source)} 家媒體** | 去重後
+
+## 本日彙整
+
+"""
+    for i, it in enumerate(items, 1):
+        body += f"### {i}. {it.get('title_zh') or it.get('title', '')}\n\n"
+        body += f"- **來源**: {it.get('source_name', '')}\n"
+        body += f"- **德文標題**: {it.get('title', '')}\n"
+        if it.get('summary_zh'):
+            body += f"- **摘要**: {it.get('summary_zh', '')[:200]}\n"
+        body += f"- **連結**: {it.get('url', '')}\n\n"
+
+    body += "\n## 媒體分布\n\n"
+    for s, lst in sorted(by_source.items(), key=lambda kv: -len(kv[1])):
+        body += f"- **{s}**: {len(lst)} 則\n"
+
+    body += f"\n## GitHub\n\nhttps://github.com/{github_url}/blob/main/immobilien-kb/vault/Daily/{date_str}/\n"
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(body)
+    return path

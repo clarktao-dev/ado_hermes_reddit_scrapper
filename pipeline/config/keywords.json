@@ -1,0 +1,34 @@
+{
+  "_comment": "News filtering rules. include: title/content must contain ≥1 word. exclude: skip if any word matches. branch_* triggers a separate persistent page in vault/Laws/ or vault/Institutions/.",
+  "include": [
+    "Immobilie", "Immobilien", "Bauen", "Hausbau", "Wohnung", "Wohnungen",
+    "Miete", "Mieten", "Mietpreis", "Eigenheim", "Eigentum", "Wohneigentum",
+    "Grundsteuer", "Baukosten", "Bauzinsen", "Zinsen", "Hypothek",
+    "Finanzierung", "Eigenkapital", "Baugenehmigung", "Energieausweis",
+    "KfW", "Wohngeld", "Baukindergeld", "Nebenkosten", "Makler",
+    "Wärmepumpe", "Sanierung", "Neubau", "Bestandsbau", "Bauordnung",
+    "Bebauungsplan", "Denkmalschutz", "Erbpacht", "Zwangsversteigerung",
+    "BauGB", "WEG", "Mietrecht", "Mietpreisbremse", "Wohnungsmarkt",
+    "Baufinanzierung", "Baudarlehen", "Annuität", "Tilgung"
+  ],
+  "exclude": [
+    "Stellenanzeige", "Stellenangebot", "Werbe", "Sponsored", "Anzeige",
+    "Gewinnspiel", "Gewinn", "Verlosung", "Newsletter-Abo"
+  ],
+  "branch_laws": [
+    "Grundsteuer", "BauGB", "Baugesetzbuch", "WEG", "Wohnungseigentumsgesetz",
+    "Mietrecht", "Mietpreisbremse", "Wohnraumförderungsgesetz"
+  ],
+  "branch_institutions": [
+    "KfW", "Bundesbank", "BaFin", "DIW", "ifo Institut", "BBSR", "Destatis",
+    "Bundesbauministerium", "BMWSB"
+  ],
+  "branch_programs": [
+    "Baukindergeld", "Wohngeld", "KfW-Programm", "Förderung", "Förderprogramm",
+    "Wohnungsbauförderung"
+  ],
+  "dedup": {
+    "title_similarity_threshold": 0.85,
+    "method": "rapidfuzz ratio; same event → keep highest-priority source"
+  }
+}

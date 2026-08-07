@@ -1,0 +1,24 @@
+{
+  "_comment": "Pipeline-wide constants. discord channel id 'headlines' resolves via discord_sender.py aliases.",
+  "ollama": {
+    "base_url": "https://ollama.com/v1",
+    "model": "deepseek-v4-flash:0731",
+    "temperature": 0.1
+  },
+  "discord": {
+    "channel_alias": "headlines",
+    "max_chars_per_message": 1900
+  },
+  "github": {
+    "repo_dir": "/root/projects/ado_hermes_reddit_scrapper",
+    "owner": "clarktao-dev",
+    "repo": "ado_hermes_reddit_scrapper",
+    "key_path": "/root/.ssh/ado_reddit_deploy",
+    "max_retries": 3
+  },
+  "vault": {
+    "root": "/root/projects/ado_hermes_reddit_scrapper/immobilien-kb",
+    "news_subdir": "vault/Daily",
+    "youtube_subdir": "vault/YouTube"
+  }
+}
