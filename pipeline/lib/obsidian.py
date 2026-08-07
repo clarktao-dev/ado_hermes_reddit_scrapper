@@ -4,10 +4,36 @@ Produces markdown files in vault/Daily/YYYY-MM-DD/ and vault/YouTube/{Channel}/
 with YAML frontmatter so Dataview queries and Obsidian plugins can read them.
 """
 import os
+import shutil
+import re
+import sys
 from datetime import datetime
 from urllib.parse import urlparse
 
-import re
+
+def _check_traditional(item, strict=True):
+    """DEPRECATED — superseded by _validate_against_system_prompt below which
+    runs the full SYSTEM-prompt rule set (including simplified Chinese)."""
+    raise NotImplementedError("Use _validate_against_system_prompt instead.")
+
+
+def _validate_against_system_prompt(item, strict=True):
+    """Run the full SYSTEM-prompt validation gate. Raises ValueError on any
+    'error'-level issue, logs warnings, when strict=True.
+    """
+    from pipeline.lib.translate import validate_zh_item, has_errors, filter_errors
+    issues = validate_zh_item(item)
+    errors = filter_errors(issues)
+    warnings = [i for i in issues if i[1] == "warn"]
+    for rule, sev, msg in warnings:
+        print(f"[obsidian.gate] WARN: {rule}: {msg}", file=sys.stderr)
+    if errors and strict:
+        lines = "\n".join(f"  - {r}: {m}" for r, _s, m in errors)
+        src = item.get("source_name", "?")
+        title = (item.get("title") or "")[:60]
+        raise ValueError(
+            f"[obsidian.gate] REJECT item from {src} ({title!r}):\n{lines}"
+        )
 
 
 def _slugify(text, max_len=80):
@@ -17,11 +43,20 @@ def _slugify(text, max_len=80):
     return s[:max_len].rstrip("-")
 
 
-def write_news_item(item, vault_root, date_str):
+def write_news_item(item, vault_root, date_str, strict_traditional=True):
     """Write a single news item as a markdown file in vault/Daily/{date}/.
     Returns the absolute path written.
+
+    Raises ValueError if the item fails the SYSTEM-prompt validation gate
+    (unless `strict_traditional=False`, in which case it logs and continues).
     """
+    # Gate: run every SYSTEM-prompt rule. Reject if any error-level fails.
+    _validate_against_system_prompt(item, strict=strict_traditional)
+
     out_dir = os.path.join(vault_root, "Daily", date_str)
+    # NOTE: We do NOT wipe the daily folder here — that would destroy items
+    # written by previous calls in the same run. The wipe is done ONCE by
+    # news_daily.step_write_vault() before the loop begins.
     os.makedirs(out_dir, exist_ok=True)
 
     src_id = item.get("source_id", "unknown")

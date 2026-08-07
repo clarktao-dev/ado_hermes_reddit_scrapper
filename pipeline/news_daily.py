@@ -186,20 +186,35 @@ def filter_by_relevance(items, min_score=5):
 
 
 def step_write_vault(items, cfg):
-    """Write each item as a markdown file + the daily index file."""
+    """Write each item as a markdown file + the daily index file.
+
+    Wipes the existing daily folder BEFORE writing so re-runs don't
+    accumulate stale items. The wipe is opt-in: pass cfg.vault.wipe=False
+    (or env VAULT_KEEP=1) to disable for debugging.
+    """
+    import shutil
     vault_cfg = cfg.get("vault", {})
     vault_root = vault_cfg.get("root")
     if not vault_root:
         raise ValueError("cfg.vault.root missing — check config/pipeline.json")
     github_url = f"{cfg.get('github', {}).get('owner', '')}/{cfg.get('github', {}).get('repo', '')}"
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    out_dir = os.path.join(vault_root, "Daily", date_str)
+    # Wipe once before the loop so re-runs on the same date don't accumulate
+    # stale items. Disable with cfg.vault.wipe=False or VAULT_KEEP=1.
+    wipe = vault_cfg.get("wipe", True) and os.environ.get("VAULT_KEEP") != "1"
+    wiped = False
+    if wipe and os.path.isdir(out_dir):
+        shutil.rmtree(out_dir)
+        wiped = True
     written = []
     for it in items:
         path = obsidian.write_news_item(it, vault_root, date_str)
         written.append(path)
     index_path = obsidian.write_daily_index(items, vault_root, date_str, github_url)
     written.append(index_path)
-    print(f"  wrote {len(written)} files under {vault_root}/Daily/{date_str}/")
+    print(f"  wrote {len(written)} files under {vault_root}/Daily/{date_str}/"
+          f"{' (wiped existing)' if wiped else ''}")
     return items  # return items so next step has data
 
 
