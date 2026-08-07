@@ -8,7 +8,9 @@
   "discord": {
     "channel_alias": "headlines",
     "max_chars_per_message": 1900,
-    "summary_chars_per_embed": 1500
+    "summary_chars_per_embed": 3800,
+    "per_item_summary_chars": 600,
+    "items_per_embed": 3
   },
   "github": {
     "repo_dir": "/root/projects/ado_hermes_reddit_scrapper",

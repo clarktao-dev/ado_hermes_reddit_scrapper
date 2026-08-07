@@ -221,17 +221,22 @@ def step_write_vault(items, cfg):
 def step_send_discord(items, cfg, dry_run):
     """Send the daily digest to Discord. dry_run=True just prints the would-be payload length.
 
-    Sends 3 messages total (to avoid Discord per-channel rate limits on bursts):
-      1. Header embed — index of all titles + source/date.
-      2. Body embed A — items 1..mid with full Chinese summary + URL.
-      3. Body embed B — items mid+1..N with full Chinese summary + URL.
+    Sends 1 header + N body embeds (configurable via discord.items_per_embed,
+    default 3) so each embed stays well under Discord's 4096-char limit and
+    the burst never triggers per-channel rate limits.
 
-    Each embed respects Discord's 4096-char description limit; if the body
-    exceeds that we chunk further and send as plain text instead.
+      - Header embed — index of all titles + source/date.
+      - Body embeds — every `items_per_embed` items, with full Chinese
+        summary + URL.
+
+    `cfg.discord.per_item_summary_chars` (default 600) caps each item's
+    summary so 3 items + headers + URLs comfortably fit in one embed.
     """
     discord_cfg = cfg.get("discord", {})
     alias = discord_cfg.get("channel_alias", "headlines")
     summary_max = int(discord_cfg.get("summary_chars_per_embed", 3800))
+    per_item_max = int(discord_cfg.get("per_item_summary_chars", 600))
+    items_per_embed = int(discord_cfg.get("items_per_embed", 3))
     if not items:
         print("  no items to send")
         return False
@@ -239,8 +244,9 @@ def step_send_discord(items, cfg, dry_run):
     channel_id = mod._resolve_channel(alias)  # noqa: SLF001 (intentional; alias→id mapping lives there)
 
     if dry_run:
-        print(f"  [dry-run] would send header + 2 body embeds to channel '{alias}' "
-              f"({len(items)} items)")
+        body_count = (len(items) + items_per_embed - 1) // items_per_embed
+        print(f"  [dry-run] would send 1 header + {body_count} body embeds to "
+              f"channel '{alias}' ({len(items)} items, {items_per_embed}/embed)")
         return False
 
     # ---- Header embed ----
@@ -254,20 +260,19 @@ def step_send_discord(items, cfg, dry_run):
                         title="📰 德國房地產每日頭條",
                         color=0x3498db)
 
-    # ---- Body embeds (split into 2 batches) ----
-    n = len(items)
-    mid = (n + 1) // 2  # e.g. 10 → 5, 9 → 5
-    per_item_summary_max = int(discord_cfg.get("per_item_summary_chars", 600))
-    batches = [("上半", items[:mid]), ("下半", items[mid:])]
+    # ---- Body embeds: split into chunks of items_per_embed ----
     ok = True
-    for label, batch in batches:
+    body_index = 0
+    for start in range(0, len(items), items_per_embed):
+        body_index += 1
+        batch = items[start:start + items_per_embed]
         body_lines = []
-        for i, it in enumerate(batch, 1):
-            global_i = (1 if label == "上半" else mid + 1) + (i - 1)
+        for j, it in enumerate(batch, 1):
+            global_i = start + j
             title = it.get("title_zh") or it.get("title", "")
             summary = it.get("summary_zh") or ""
-            if len(summary) > per_item_summary_max:
-                summary = summary[:per_item_summary_max] + "…(截斷)"
+            if len(summary) > per_item_max:
+                summary = summary[:per_item_max] + "…(截斷)"
             url = it.get("url", "")
             src = it.get("source_name", "?")
             body_lines.append(f"### {global_i}. {title}\n*來源：{src}*")
@@ -277,12 +282,14 @@ def step_send_discord(items, cfg, dry_run):
                 body_lines.append(f"🔗 {url}")
             body_lines.append("")  # blank line between items
         body = "\n".join(body_lines)[:summary_max]
+        # Color gradient blue → green → teal by batch index.
+        color = 0x2ecc71 + (body_index * 0x050505)
         result = mod.send_to_channel(
             channel_id,
             body,
             as_embed=True,
-            title=f"📖 {label}場摘要",
-            color=0x2ecc71,
+            title=f"📖 第 {body_index} 場摘要",
+            color=color,
         )
         if not result:
             ok = False
@@ -414,8 +421,10 @@ def main():
                    help="Run steps 1-6 only (no vault / discord / github side effects).")
     p.add_argument("--limit", type=int, default=None,
                    help="Limit the number of RSS sources fetched (for testing).")
-    p.add_argument("--chunk-size", type=int, default=8,
-                   help="Batch size for the LLM translation step.")
+    p.add_argument("--chunk-size", type=int, default=4,
+                   help="Batch size for the LLM translation step. chunk=4 avoids "
+                        "ollama-cloud hangs that happen with chunk=8 after ~7 sequential "
+                        "requests; slower per-batch but reliable.")
     p.add_argument("--max-days", type=int, default=3,
                    help="Only include items published within the last N days. "
                         "0 disables age filtering.")
