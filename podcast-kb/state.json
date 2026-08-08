@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "channels": {
+    "finanztip": {
+      "last_processed_epoch": 1786159327,
+      "processed_ids": [
+        "-6_VR-UOIN4"
+      ]
+    },
+    "1alage": {
+      "last_processed_epoch": 1785984338,
+      "processed_ids": [
+        "Tmo2dfLCwY8"
+      ]
+    }
+  }
+}
