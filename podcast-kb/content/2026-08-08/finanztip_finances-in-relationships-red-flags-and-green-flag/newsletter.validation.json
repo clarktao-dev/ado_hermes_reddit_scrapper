@@ -1,0 +1,49 @@
+{
+  "format": "newsletter",
+  "vault": "podcast-kb/vault/Daily/2026-08-08/finanztip_finances-in-relationships-red-flags-and-green-flag.md",
+  "content_chars": 2668,
+  "validators": [
+    {
+      "name": "has_no_simplified",
+      "ok": true,
+      "msg": ""
+    },
+    {
+      "name": "has_german_terms",
+      "ok": false,
+      "msg": "only 0 German-in-parens terms found (need 2)"
+    },
+    {
+      "name": "is_nonempty",
+      "ok": true,
+      "msg": ""
+    },
+    {
+      "name": "section_subject",
+      "ok": true,
+      "msg": "missing (advisory): 主旨"
+    },
+    {
+      "name": "section_intro",
+      "ok": true,
+      "msg": "missing (advisory): 引言"
+    },
+    {
+      "name": "section_body",
+      "ok": true,
+      "msg": "missing (advisory): 主體"
+    },
+    {
+      "name": "section_cta",
+      "ok": true,
+      "msg": "missing (advisory): CTA"
+    },
+    {
+      "name": "section_keyword_box",
+      "ok": true,
+      "msg": "missing (advisory): 關鍵字"
+    }
+  ],
+  "all_passed": false,
+  "n_warnings": 1
+}

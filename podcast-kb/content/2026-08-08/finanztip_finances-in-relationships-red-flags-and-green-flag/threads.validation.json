@@ -1,0 +1,29 @@
+{
+  "format": "threads",
+  "vault": "podcast-kb/vault/Daily/2026-08-08/finanztip_finances-in-relationships-red-flags-and-green-flag.md",
+  "content_chars": 1295,
+  "validators": [
+    {
+      "name": "has_no_simplified",
+      "ok": true,
+      "msg": ""
+    },
+    {
+      "name": "is_nonempty",
+      "ok": true,
+      "msg": ""
+    },
+    {
+      "name": "max_posts",
+      "ok": false,
+      "msg": "FAIL: 9 posts (max 8) — too many, condense content"
+    },
+    {
+      "name": "post_2_char_count",
+      "ok": false,
+      "msg": "FAIL: 281 chars (max 280) — must split into more posts"
+    }
+  ],
+  "all_passed": false,
+  "n_warnings": 2
+}

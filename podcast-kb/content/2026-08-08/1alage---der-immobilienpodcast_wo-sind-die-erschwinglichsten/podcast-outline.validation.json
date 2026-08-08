@@ -1,0 +1,39 @@
+{
+  "format": "podcast-outline",
+  "vault": "podcast-kb/vault/Daily/2026-08-08/1alage---der-immobilienpodcast_wo-sind-die-erschwinglichsten.md",
+  "content_chars": 3766,
+  "validators": [
+    {
+      "name": "has_no_simplified",
+      "ok": true,
+      "msg": ""
+    },
+    {
+      "name": "has_german_terms",
+      "ok": false,
+      "msg": "only 0 German-in-parens terms found (need 2)"
+    },
+    {
+      "name": "is_nonempty",
+      "ok": true,
+      "msg": ""
+    },
+    {
+      "name": "section_intro",
+      "ok": true,
+      "msg": "missing (advisory): Intro"
+    },
+    {
+      "name": "section_outro",
+      "ok": true,
+      "msg": "missing (advisory): Outro"
+    },
+    {
+      "name": "section_count",
+      "ok": true,
+      "msg": "0 段落 markers (advisory)"
+    }
+  ],
+  "all_passed": false,
+  "n_warnings": 1
+}

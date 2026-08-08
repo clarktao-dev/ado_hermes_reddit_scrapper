@@ -1,0 +1,24 @@
+{
+  "format": "twitter",
+  "vault": "podcast-kb/vault/Daily/2026-08-08/1alage---der-immobilienpodcast_wo-sind-die-erschwinglichsten.md",
+  "content_chars": 1654,
+  "validators": [
+    {
+      "name": "has_no_simplified",
+      "ok": true,
+      "msg": ""
+    },
+    {
+      "name": "is_nonempty",
+      "ok": true,
+      "msg": ""
+    },
+    {
+      "name": "thread_marker",
+      "ok": false,
+      "msg": "first tweet missing 🧵 marker"
+    }
+  ],
+  "all_passed": false,
+  "n_warnings": 1
+}
