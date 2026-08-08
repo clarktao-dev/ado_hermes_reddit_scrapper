@@ -5,6 +5,7 @@
       "id": "finanztip",
       "name": "Finanztip",
       "url": "https://www.youtube.com/@finanztip",
+      "channel_id": "UC-muQylmRx61Mt6U1oDSEVA",
       "category": "general_finance",
       "enabled": true
     },
@@ -12,6 +13,7 @@
       "id": "marktcheck",
       "name": "Marktcheck",
       "url": "https://www.youtube.com/@marktcheck",
+      "channel_id": "UCxec_VgCE-5DUZ8MocKbEdg",
       "category": "real_estate",
       "enabled": true
     },
@@ -19,6 +21,7 @@
       "id": "finanzfluss",
       "name": "Finanzfluss",
       "url": "https://www.youtube.com/@Finanzfluss",
+      "channel_id": "UCeARcCUiZg79SQQ-2_XNlXQ",
       "category": "general_finance",
       "enabled": true
     },
@@ -26,6 +29,7 @@
       "id": "1alage",
       "name": "1aLAGE Immobilienpodcast",
       "url": "https://www.youtube.com/@1aLAGE-Immobilienpodcast",
+      "channel_id": "UC5J05pQ9D5VjmkFd-xufMtA",
       "category": "real_estate",
       "enabled": true
     },
@@ -33,6 +37,7 @@
       "id": "lbsnordwest",
       "name": "LBS Immobilien Nordwest",
       "url": "https://www.youtube.com/@lbsimmobiliennordwest",
+      "channel_id": "UCnAIZCZOetst9APS5aI37wA",
       "category": "real_estate",
       "enabled": true
     },
@@ -40,6 +45,7 @@
       "id": "ex_makler",
       "name": "Der Ex-Makler",
       "url": "https://www.youtube.com/@Der-Ex-Makler",
+      "channel_id": "UCc6pj_-MUg_Q9NAzzShpuiQ",
       "category": "real_estate",
       "enabled": true
     },
@@ -47,6 +53,7 @@
       "id": "mrsteuer",
       "name": "Mr. Steuer",
       "url": "https://www.youtube.com/@mrsteuer",
+      "channel_id": "UCigtuurEEt3QLwazM_9OvVA",
       "category": "tax",
       "enabled": true
     },
@@ -54,6 +61,7 @@
       "id": "immocation",
       "name": "Immocation",
       "url": "https://www.youtube.com/@immocation",
+      "channel_id": "UCVUYh7UEdKW8v3cPIDA4Iow",
       "category": "real_estate",
       "enabled": true
     }

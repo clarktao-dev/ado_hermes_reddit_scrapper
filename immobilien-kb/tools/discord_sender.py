@@ -60,6 +60,8 @@ def _resolve_channel(channel: str) -> str:
         "home": "1495548848183967916",      # main channel id
         "headlines": "1520791894995501106",  # #每日頭條
         "每日頭條": "1520791894995501106",
+        "podcast": "1535461574460968960",    # #每日podcast (YouTube transcript digest)
+        "每日podcast": "1535461574460968960",
     }
     if channel in aliases:
         return aliases[channel]
