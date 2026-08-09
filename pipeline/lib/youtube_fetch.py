@@ -15,12 +15,27 @@ it's a single point of failure.
 """
 from __future__ import annotations
 import json
+import logging
 import subprocess
 import time
+import urllib.request
 from dataclasses import dataclass
 from typing import List, Optional
 
 import requests
+
+
+logger = logging.getLogger(__name__)
+
+
+# Invidious public instances used as the primary source for channel-video
+# listings. YouTube's official RSS feed is blocked on this VPS (1/8 channels
+# return data; the rest 500/404), so we rotate through Invidious instances
+# before falling back to yt-dlp. Order matters: first healthy instance wins.
+INVIDIOUS_INSTANCES = [
+    "https://invidious.materialio.us",
+    "https://invidious.flokinet.to",
+]
 
 
 _KOME_URL = "https://kome.ai/api/transcript"
@@ -127,19 +142,85 @@ def _fetch_published_from_rss(channel_id: str, cache_ttl_sec: int = 3600) -> dic
 _RSS_CACHE: dict = {}
 
 
-def list_channel_videos(channel_id: str, channel_name: str, channel_url: str,
-                        limit: int = 10, *, youtube_channel_id: Optional[str] = None) -> List[VideoMeta]:
-    """Fetch latest videos metadata for a channel. Sorted newest first by real publish date.
+def _list_via_invidious(channel: dict, limit: int = 10) -> List[VideoMeta]:
+    """Fetch latest videos for a channel via the Invidious public API.
 
-    Args:
-        channel_id: internal id used by the pipeline (e.g. '1alage')
-        channel_name: human channel name (e.g. '1aLAGE Immobilienpodcast')
-        channel_url: public YouTube URL (https://www.youtube.com/@handle/videos)
-        limit: max videos to return
-        youtube_channel_id: YouTube's UC... channel id (from channels.json). When
-            provided, we also pull the real published timestamp from the YouTube
-            RSS feed, since yt-dlp's flat-playlist epoch is the playlist-add time
-            and can be wildly wrong.
+    Tries each instance in ``INVIDIOUS_INSTANCES`` in order; returns as soon
+    as one returns at least one video. Raises ``RuntimeError`` only when every
+    instance fails (network / 4xx / 5xx / empty payload).
+
+    Invidious returns rich metadata that YouTube's official RSS feed does not
+    expose — most importantly ``lengthSeconds`` and a real Unix-epoch
+    ``published`` timestamp — so this is the preferred primary path.
+    """
+    channel_id = channel.get("channel_id") or channel.get("id")
+    if not channel_id:
+        return []
+    canonical_id = channel["id"]
+    for instance in INVIDIOUS_INSTANCES:
+        try:
+            url = f"{instance}/api/v1/channels/{channel_id}"
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; hermes-youtube-fetch/1.0)"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
+            videos = data.get("latestVideos", [])
+            if not videos:
+                logger.warning(
+                    "invidious %s returned no latestVideos for %s (UC=%s)",
+                    instance, canonical_id, channel_id,
+                )
+                continue
+            metas: List[VideoMeta] = []
+            for v in videos[:limit]:
+                vid = v.get("videoId")
+                if not vid:
+                    continue
+                length = v.get("lengthSeconds")
+                try:
+                    duration_sec: int = int(length) if length is not None else 0
+                except (TypeError, ValueError):
+                    duration_sec = 0
+                published = v.get("published")
+                try:
+                    epoch: Optional[int] = int(published) if published is not None else None
+                except (TypeError, ValueError):
+                    epoch = None
+                metas.append(VideoMeta(
+                    id=vid,
+                    title=v.get("title", ""),
+                    duration_sec=duration_sec,
+                    epoch=epoch,
+                    url=f"https://www.youtube.com/watch?v={vid}",
+                    channel_id=channel_id,
+                    channel_name=channel.get("name") or data.get("author", ""),
+                    view_count=v.get("viewCount"),
+                ))
+            logger.info(
+                "invidious: got %d videos from %s for %s",
+                len(metas), instance, canonical_id,
+            )
+            return metas
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "invidious %s failed for %s (UC=%s): %s",
+                instance, canonical_id, channel_id, e,
+            )
+            continue
+    raise RuntimeError(f"All Invidious instances failed for {canonical_id}")
+
+
+def _list_via_ytdlp_inline(channel_id: str, channel_name: str, channel_url: str,
+                            limit: int, youtube_channel_id: Optional[str]) -> List[VideoMeta]:
+    """Legacy yt-dlp + YouTube-RSS fallback. Inlined to avoid signature drift.
+
+    Kept because Invidious is a third-party service that may disappear; yt-dlp
+    on a residential / non-VPS IP still works for channel listings. Broken on
+    the VPS (YouTube bot detection) but this branch is only hit if every
+    Invidious instance fails.
     """
     raw = _run_yt_dlp(channel_url, limit=limit)
     rss_published: dict = {}
@@ -151,8 +232,6 @@ def list_channel_videos(channel_id: str, channel_name: str, channel_url: str,
     metas: List[VideoMeta] = []
     for d in raw[:limit]:
         try:
-            # Prefer RSS published timestamp; fall back to yt-dlp epoch (which is
-            # the playlist-add time and may be off by months/years).
             vid = d["id"]
             rss_epoch = rss_published.get(vid)
             yt_dlp_epoch = d.get("epoch") or d.get("timestamp") or d.get("release_timestamp")
@@ -169,24 +248,52 @@ def list_channel_videos(channel_id: str, channel_name: str, channel_url: str,
             ))
         except (KeyError, ValueError):
             continue
-    # Filter out videos that lack RSS-supplied epoch — these are typically YouTube Shorts
-    # which YouTube RSS feed doesn't include. Without RSS epoch we can't trust the
-    # yt-dlp 'epoch' (which is playlist-add time, can be wildly wrong). Excluding them
-    # also prevents picking new uploads that haven't been around long enough to be
-    # trusted.
     rss_videos = [m for m in metas if m.epoch and m.epoch > 0]
     if rss_videos:
-        # Use only RSS-confirmed videos (real long-form uploads)
         metas = rss_videos
-    # Drop videos whose epoch is not RSS-confirmed (YouTube Shorts, scheduled premieres,
-    # YT Music tracks, etc.). yt-dlp's flat-playlist epoch is the playlist-add time and
-    # can be wildly wrong (off by a year in some cases). We only want videos with a real
-    # uploaded_at from the RSS feed.
     confirmed = [m for m in metas if m.id in rss_published and rss_published[m.id]]
     metas = confirmed
-    # Newest first
     metas.sort(key=lambda v: v.epoch or 0, reverse=True)
     return metas
+
+
+def list_channel_videos(channel_id: str, channel_name: str, channel_url: str,
+                        limit: int = 10, *, youtube_channel_id: Optional[str] = None) -> List[VideoMeta]:
+    """Fetch latest videos metadata for a channel. Sorted newest first.
+
+    Resolution order:
+      1. Invidious public instances (primary — works on the VPS; rich metadata).
+      2. yt-dlp + YouTube RSS fallback (legacy; broken on VPS, kept for local).
+
+    Args:
+        channel_id: internal id used by the pipeline (e.g. '1alage').
+        channel_name: human channel name (e.g. '1aLAGE Immobilienpodcast').
+        channel_url: public YouTube URL (https://www.youtube.com/@handle/videos).
+        limit: max videos to return.
+        youtube_channel_id: YouTube's UC... channel id (from channels.json).
+            Passed through to the Invidious URL and to the yt-dlp RSS layer.
+    """
+    channel = {
+        "id": channel_id,
+        "name": channel_name,
+        "url": channel_url,
+        "channel_id": youtube_channel_id or channel_id,
+    }
+    # 1. Invidious (primary).
+    try:
+        metas = _list_via_invidious(channel, limit)
+        if metas:
+            metas.sort(key=lambda v: v.epoch or 0, reverse=True)
+            return metas
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "Invidious path failed for %s — falling back to yt-dlp: %s",
+            channel_id, e,
+        )
+    # 2. yt-dlp + RSS (final fallback; broken on VPS but kept for local).
+    return _list_via_ytdlp_inline(
+        channel_id, channel_name, channel_url, limit, youtube_channel_id,
+    )
 
 
 def fetch_transcript(video: VideoMeta, timeout: int = 30,
