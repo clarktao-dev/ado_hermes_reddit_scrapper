@@ -15,8 +15,11 @@ EMBED_MAX_CHARS = 4000  # Discord hard cap is 4096; leave a small safety margin
 
 
 def _send(channel: str, content: str, as_embed: bool = True, title: str = "",
-          retries: int = 3) -> bool:
-    """Wrapper around discord_sender.py — returns True on success.
+          retries: int = 3) -> list:
+    """Wrapper around discord_sender.py — returns list of message_ids on success.
+    Empty list on failure (after retries). discord_sender.py already prints
+    'OK: sent N message(s)' to stdout; we capture that to harvest message_ids
+    via a second CLI call that prints them. (Cheap: discord_sender is <2s.)
     Retries up to `retries` times on transient failures (Discord API can
     return 5xx or hang under VPS IP blocks)."""
     cmd = ["python3", DISCORD_SENDER, channel]
@@ -27,14 +30,41 @@ def _send(channel: str, content: str, as_embed: bool = True, title: str = "",
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
             if proc.returncode == 0:
-                return True
+                # discord_sender.py prints "OK: sent N message(s)" then
+                # one "  id: <mid>" per sent message. Harvest those.
+                mids: list = []
+                import re as _re
+                for line in proc.stdout.splitlines():
+                    m = _re.search(r"id:\s*(\d{17,20})", line)
+                    if m:
+                        mids.append(m.group(1))
+                if mids:
+                    return mids
+                # Fallback: call discord_sender.send_to_channel directly
+                # to get the structured return value.
+                try:
+                    import importlib.util as _ilu
+                    spec = _ilu.spec_from_file_location(
+                        "discord_sender", DISCORD_SENDER
+                    )
+                    if spec is None or spec.loader is None:
+                        return []
+                    mod = _ilu.module_from_spec(spec)
+                    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+                    res = mod.send_to_channel(channel, content,
+                                              as_embed=as_embed, title=title or "")
+                    if res.get("ok") and res.get("message_ids"):
+                        return list(res["message_ids"])
+                except Exception:
+                    pass
+                return []
             print(f"    [discord] attempt {attempt + 1}/{retries} failed: rc={proc.returncode}")
         except subprocess.TimeoutExpired:
             print(f"    [discord] attempt {attempt + 1}/{retries} timeout")
         if attempt < retries - 1:
             import time
             time.sleep(2)
-    return False
+    return []
 
 
 def _build_embed_body(d) -> str:
@@ -97,6 +127,7 @@ def step_send_discord(digests, channel: str = "podcast",
         body = _build_embed_body(d)
         chunks = _split_chunks(body)
         sent_for_video = 0
+        message_ids_for_video: list = []
         for idx, chunk in enumerate(chunks):
             # Same title for all chunks of one video so they group in Discord
             title = d.title[:80] if idx == 0 else f"{d.title[:60]}（續 {idx + 1}/{len(chunks)}）"
@@ -107,14 +138,17 @@ def step_send_discord(digests, channel: str = "podcast",
                     "len_chars": len(chunk),
                 })
             else:
-                if _send(channel, chunk, title=title):
+                mids = _send(channel, chunk, title=title)
+                if mids:
                     sent_for_video += 1
+                    message_ids_for_video.extend(mids)
                 else:
                     summary["errors"].append(f"send failed: {d.video_id} chunk {idx + 1}")
         summary["per_video"].append({
             "video_id": d.video_id,
             "title": d.title,
             "n_embeds": sent_for_video,
+            "message_ids": message_ids_for_video,
         })
         summary["n_embeds"] += sent_for_video
 
