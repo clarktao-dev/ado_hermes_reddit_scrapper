@@ -103,6 +103,18 @@
       "description": "Operational tags applied by the pipeline."
     },
     {
+      "name": "article_type",
+      "type": "singleSelect",
+      "required": false,
+      "options": [
+        "short-summary",
+        "long-form",
+        "pending-long-form",
+        "skipped-long-form"
+      ],
+      "description": "Article format this record has been produced in. Task 7 (2026-08-09): defaults to short-summary for daily pipeline; long-form is on-demand via recommend_long_form.py confirm."
+    },
+    {
       "name": "discord_message_id",
       "type": "singleLineText",
       "required": false,

@@ -342,6 +342,7 @@ class ProcessedStore:
         metadata: Optional[Dict[str, Any]] = None,
         tags: Optional[List[str]] = None,
         first_seen_at: Optional[datetime] = None,
+        article_type: Optional[str] = None,
     ) -> str:
         """Idempotently mark an item as processed. Returns the record ID.
 
@@ -353,6 +354,15 @@ class ProcessedStore:
 
         ``first_seen_at`` defaults to "now" on first insert and is
         preserved on subsequent updates.
+
+        ``article_type`` (Task 7, 2026-08-09): optional ``singleSelect`` on
+        the ProcessedContent ledger — one of ``short-summary``,
+        ``long-form``, ``pending-long-form``, ``skipped-long-form``. The
+        default daily pipeline uses ``short-summary`` to save tokens;
+        ``long-form`` is on-demand via
+        ``pipeline/scripts/recommend_long_form.py confirm``. When None,
+        the field is left untouched on PATCH or omitted on create
+        (backward-compatible — callers from Task 1-6 still work).
         """
         source_hash = make_hash(source_type, source_id)
         # Build the field payload (always include processed_at = now)
@@ -373,6 +383,8 @@ class ProcessedStore:
             fields["metadata"] = json.dumps(metadata, ensure_ascii=False)
         if tags:
             fields["tags"] = list(tags)
+        if article_type:
+            fields["article_type"] = article_type
 
         # Path 1: cache hit — update the existing record.
         cached = self._seen_cache.get(source_hash)
