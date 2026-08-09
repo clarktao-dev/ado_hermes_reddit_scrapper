@@ -46,7 +46,7 @@
     {
       "id": "google_news_immobilien",
       "name": "Google News (Immobilien)",
-      "url": "https://news.google.com/rss/search?q=Immobilien+OR+Wohnung+OR+Mietrecht+OR+Baufinanzierung+OR+Eigentumswohnung+when:7d&hl=de&gl=DE&ceid=DE:de",
+      "url": "https://news.google.com/rss/search?q=Immobilien+OR+Wohnung+OR+Mietrecht+OR+Bauzinsen+OR+Baufinanzierung+OR+Eigentumswohnung+when:7d&hl=de&gl=DE&ceid=DE:de",
       "enabled": true,
       "priority": 7,
       "no_full_text": true,
