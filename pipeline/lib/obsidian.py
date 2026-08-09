@@ -43,12 +43,19 @@ def _slugify(text, max_len=80):
     return s[:max_len].rstrip("-")
 
 
-def write_news_item(item, vault_root, date_str, strict_traditional=True):
+def write_news_item(item, vault_root, date_str, strict_traditional=True,
+                     content_kind: str = "longform"):
     """Write a single news item as a markdown file in vault/Daily/{date}/.
     Returns the absolute path written.
 
     Raises ValueError if the item fails the SYSTEM-prompt validation gate
     (unless `strict_traditional=False`, in which case it logs and continues).
+
+    ``content_kind`` (Task 7, 2026-08-09): when ``"short-summary"`` (or
+    anything other than the legacy ``"longform"``), the file is suffixed
+    ``_summary.md`` instead of the legacy ``.md``/``_longform.md``. This
+    lets a daily ``--mode short`` news run coexist with on-demand
+    ``--mode long`` outputs in the same date folder.
     """
     # Gate: run every SYSTEM-prompt rule. Reject if any error-level fails.
     _validate_against_system_prompt(item, strict=strict_traditional)
@@ -68,7 +75,8 @@ def write_news_item(item, vault_root, date_str, strict_traditional=True):
 
     src_id = item.get("source_id", "unknown")
     title_slug = _slugify(item.get("title", "untitled"), max_len=50)
-    fname = f"{src_id}-{title_slug}.md"
+    suffix = "_summary" if content_kind == "short-summary" else "_longform"
+    fname = f"{src_id}-{title_slug}{suffix}.md"
     path = os.path.join(out_dir, fname)
 
     # YAML frontmatter

@@ -36,6 +36,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import List, Optional
 
 # Ensure the pipeline package is importable when invoked as a script.
@@ -388,12 +389,19 @@ def filter_by_relevance(items, min_score=5):
     return out
 
 
-def step_write_vault(items, cfg):
+def step_write_vault(items, cfg, content_kind: str = "longform"):
     """Write each item as a markdown file + the daily index file.
 
     Wipes the existing daily folder BEFORE writing so re-runs don't
     accumulate stale items. The wipe is opt-in: pass cfg.vault.wipe=False
     (or env VAULT_KEEP=1) to disable for debugging.
+
+    ``content_kind`` (Task 7, 2026-08-09): ``"short-summary"`` or
+    ``"longform"`` (default). Controls the file suffix in
+    ``obsidian.write_news_item`` (``_summary.md`` vs ``_longform.md``).
+    Wiping is scoped to ``*<suffix>.md`` so a short-summary run can't
+    delete long-form artifacts (and vice versa) when both modes coexist
+    in the same daily folder.
 
     Returns a dict mapping each item to its written output path (used by
     :func:`step_mark_processed` to record ``output_path`` in the ledger).
@@ -406,20 +414,25 @@ def step_write_vault(items, cfg):
     github_url = f"{cfg.get('github', {}).get('owner', '')}/{cfg.get('github', {}).get('repo', '')}"
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
     out_dir = os.path.join(vault_root, "Daily", date_str)
-    # Wipe once before the loop so re-runs on the same date don't accumulate
-    # stale items. Disable with cfg.vault.wipe=False or VAULT_KEEP=1.
+    # Wipe only files of *this* content_kind so short + long can coexist.
+    # Disable with cfg.vault.wipe=False or VAULT_KEEP=1.
     wipe = vault_cfg.get("wipe", True) and os.environ.get("VAULT_KEEP") != "1"
     wiped = False
     if wipe and os.path.isdir(out_dir):
-        shutil.rmtree(out_dir)
+        suffix_glob = "_summary.md" if content_kind == "short-summary" else "_longform.md"
+        for p in Path(out_dir).glob(f"*{suffix_glob}"):
+            p.unlink()
         wiped = True
     item_paths: dict[int, str] = {}
     for i, it in enumerate(items):
-        path = obsidian.write_news_item(it, vault_root, date_str)
+        path = obsidian.write_news_item(it, vault_root, date_str,
+                                        content_kind=content_kind)
         item_paths[i] = path
+    # Index file is shared across both modes in the same daily folder —
+    # only the first call writes it.
     index_path = obsidian.write_daily_index(items, vault_root, date_str, github_url)
     print(f"  wrote {len(item_paths) + 1} files under {vault_root}/Daily/{date_str}/"
-          f"{' (wiped existing)' if wiped else ''}")
+          f" (kind={content_kind}{' wiped existing' if wiped else ''})")
     return {"items": items, "item_paths": item_paths, "index_path": index_path}
 
 
@@ -584,6 +597,7 @@ def step_mark_processed(
     store: Optional[ProcessedStore] = None,
     run_id: str = "",
     date_str: str = "",
+    article_type: Optional[str] = None,
 ) -> dict:
     """Mark every vault-written item as processed in the Airtable ledger.
 
@@ -591,6 +605,11 @@ def step_mark_processed(
     raise — the vault write already succeeded, and the next run will
     simply re-process the item. Worst case is a duplicate vault write,
     not a missed dedup.
+
+    ``article_type`` (Task 7, 2026-08-09): optional. When provided, every
+    record written here is tagged with the same value (``short-summary``
+    or ``long-form``). When None, the field is omitted entirely so older
+    callers keep working unchanged.
 
     Returns ``{"ok": int, "errors": [(idx, item, exc_str), ...], "record_ids": [...]}``.
     """
@@ -617,11 +636,12 @@ def step_mark_processed(
                 output_path=item_paths.get(idx),
                 metadata=_build_news_metadata(item, date_str),
                 tags=[],
+                article_type=article_type,
             )
             record_ids.append(record_id)
             logger.info(
-                "marked processed: news | %s -> %s",
-                url_norm, record_id,
+                "marked processed: news | %s -> %s (article_type=%s)",
+                url_norm, record_id, article_type,
             )
         except Exception as e:  # noqa: BLE001
             logger.error(
@@ -691,15 +711,18 @@ def step_update_side_effects(
 def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
                  max_days=3, quota_primary=8, quota_other=3,
                  min_relevance=5, min_quick_score=6,
-                 skip_store=False, pipeline_run_id=""):
+                 skip_store=False, pipeline_run_id="",
+                 mode: str = "short"):
     t_start = time.time()
     run_id = pipeline_run_id or datetime.now(timezone.utc).strftime(
         "news-%Y%m%d-%H%M%S"
     )
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    content_kind = "short-summary" if mode == "short" else "longform"
+    article_type = content_kind
     print(f"[news_daily] starting at {datetime.utcnow().isoformat()}Z "
           f"(dry_run={dry_run}, source_limit={source_limit}, "
-          f"run_id={run_id}, skip_store={skip_store})")
+          f"mode={mode}, run_id={run_id}, skip_store={skip_store})")
 
     # Step 1: load config
     cfg = _step("1. load_config", step_load_config)
@@ -790,7 +813,7 @@ def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
 
     # Step 7: write vault
     vault_summary = _step("7. write_vault",
-                          lambda: step_write_vault(items, cfg))
+                          lambda: step_write_vault(items, cfg, content_kind=content_kind))
     vault_items: List[dict] = list(items) if isinstance(items, list) else []
     item_paths: dict = {}
     if isinstance(vault_summary, dict):
@@ -817,6 +840,7 @@ def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
               lambda: step_mark_processed(
                   vault_items, item_paths,
                   run_id=run_id, date_str=date_str,
+                  article_type=article_type,
               ))
         _step("10b. update_side_effects",
               lambda: step_update_side_effects(
@@ -835,6 +859,13 @@ def main():
     p = argparse.ArgumentParser(description="Daily German real-estate news pipeline.")
     p.add_argument("--dry-run", action="store_true",
                    help="Run steps 1-6 only (no vault / discord / github side effects).")
+    p.add_argument("--mode", choices=("short", "long"), default="short",
+                   help="Pipeline output mode. ``short`` (default) is the "
+                        "default lightweight short-summary; ``long`` runs "
+                        "the full editorial commentary pass. Both modes "
+                        "produce a vault file with a mode-appropriate "
+                        "suffix (``_summary.md`` vs ``_longform.md``) and "
+                        "write ``article_type`` to the Airtable ledger.")
     p.add_argument("--limit", type=int, default=None,
                    help="Limit the number of RSS sources fetched (for testing).")
     p.add_argument("--chunk-size", type=int, default=2,
@@ -875,6 +906,7 @@ def main():
         min_relevance=args.min_relevance,
         min_quick_score=args.min_quick_score,
         skip_store=args.skip_store,
+        mode=args.mode,
         pipeline_run_id=args.pipeline_run_id,
     )
 

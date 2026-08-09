@@ -5,7 +5,6 @@ Re-uses the wipe-on-rerun + 0-simplified gate from news pipeline's obsidian.py.
 from __future__ import annotations
 import os
 import re
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
@@ -19,8 +18,23 @@ def _slug(text: str, max_len: int = 60) -> str:
 
 
 def step_write_vault(digests, repo_root: str, date_str: str | None = None,
-                     wipe: bool = True) -> dict:
+                     wipe: bool = True,
+                     content_kind: str = "longform") -> dict:
     """Wipe + write all digests as Markdown under podcast-kb/vault/Daily/<date>/.
+
+    Args:
+        digests: Iterable of VideoDigest (or anything with the same fields).
+        repo_root: Repository root.
+        date_str: Daily folder name (``YYYY-MM-DD``); defaults to today UTC.
+        wipe: If True (default), remove the daily folder before writing so
+            re-runs don't accumulate stale files.
+        content_kind: ``"short-summary"`` or ``"longform"`` (default). The
+            value is appended to the file slug (``_summary.md`` vs
+            ``_longform.md``) so the same date folder can hold both modes
+            side-by-side — daily ``--mode short`` writes ``_summary.md``,
+            while on-demand ``--mode long`` (via
+            ``pipeline/scripts/recommend_long_form.py confirm``) writes
+            ``_longform.md``. (Task 7, 2026-08-09.)
 
     Returns a summary dict with counts and any failed files.
     """
@@ -29,16 +43,24 @@ def step_write_vault(digests, repo_root: str, date_str: str | None = None,
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     out_dir = repo / "podcast-kb" / "vault" / "Daily" / date_str
     if wipe and out_dir.exists():
-        shutil.rmtree(out_dir)
+        # Task 7: only wipe files of *this* content_kind, so a short-summary
+        # run can't accidentally delete a long-form artifact (and vice
+        # versa). When the folder is brand-new we still wipe it whole to
+        # preserve the legacy behavior of clearing stale daily folders.
+        suffix = "_summary.md" if content_kind == "short-summary" else "_longform.md"
+        for p in out_dir.glob(f"*{suffix}"):
+            p.unlink()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     summary = {"date": date_str, "written": [], "skipped": [], "errors": []}
 
+    suffix = "_summary" if content_kind == "short-summary" else "_longform"
+    render_fn = _render_short_md if content_kind == "short-summary" else _render_digest_md
     for d in digests:
         try:
             slug = _slug(f"{d.channel_name}_{d.title}_{d.video_id}")[:80]
-            path = out_dir / f"{slug}.md"
-            content = _render_digest_md(d)
+            path = out_dir / f"{slug}{suffix}.md"
+            content = render_fn(d)
             # Defense in depth: force_traditional on the full content
             if has_simplified(content):
                 fixed = force_traditional(content)
@@ -48,13 +70,15 @@ def step_write_vault(digests, repo_root: str, date_str: str | None = None,
         except Exception as e:  # noqa: BLE001
             summary["errors"].append({"digest": d.video_id, "error": str(e)})
 
-    # Index file
+    # Index file (shared across short + long summaries in the same folder).
     index_path = out_dir / "_index.md"
-    index_path.write_text(_render_index(digests, date_str), encoding="utf-8")
-    summary["written"].append(str(index_path.relative_to(repo)))
+    if not index_path.exists():
+        index_path.write_text(_render_index(digests, date_str), encoding="utf-8")
+        summary["written"].append(str(index_path.relative_to(repo)))
 
     summary["n_files"] = len(summary["written"])
     summary["n_errors"] = len(summary["errors"])
+    summary["content_kind"] = content_kind
     return summary
 
 
@@ -118,3 +142,54 @@ def _render_index(digests, date_str: str) -> str:
         summary_short = (d.summary_zh or "（無）").split("\n")[0][:80]
         lines.append(f"| {d.channel_name} | {title_link} | {summary_short} |")
     return "\n".join(lines)
+
+
+def _render_short_md(d) -> str:
+    """Compact 200-char + bullets + view (Task 7 short-summary mode).
+
+    The daily pipeline runs in ``--mode short`` by default to save LLM
+    tokens (~25-30% of the long-form Map-Reduce). The structure prompt
+    is intentionally minimal — one summary sentence, 3-5 bullets, and
+    1-2 sentences of analyst view.
+
+    The LLM call lives in :func:`pipeline.youtube_daily.step_structure_short`
+    and writes back into ``d.summary_zh`` (200-char summary), ``d.analyst_zh``
+    (3-5 bullets), ``d.producer_zh`` (1-2 sentences). ``d.vocab_zh`` is left
+    empty — vocab is a long-form affordance only.
+    """
+    duration_min = d.duration_sec // 60
+    duration_sec = d.duration_sec % 60
+    pub = (
+        datetime.fromtimestamp(d.published_epoch, timezone.utc).strftime("%Y-%m-%d")
+        if d.published_epoch else "（未抓到、請見 YouTube 連結）"
+    )
+    parts = [
+        f"# {d.title}",
+        "",
+        f"- **頻道**：{d.channel_name}",
+        f"- **影片 ID**：`{d.video_id}`",
+        f"- **發布日期**：{pub}",
+        f"- **長度**：{duration_min} 分 {duration_sec} 秒",
+        f"- **YouTube 連結**：[觀看影片]({d.url})",
+        f"- **原文長度**：{d.n_chars:,} 字",
+        "",
+        "---",
+        "",
+        "## 一句話摘要",
+        "",
+        d.summary_zh or "（無）",
+        "",
+        "## 重點 bullets",
+        "",
+        d.analyst_zh or "（無）",
+        "",
+        "## 觀點",
+        "",
+        d.producer_zh or "（無）",
+        "",
+        "---",
+        "",
+        "_本檔案由 podcast-kb pipeline（short 模式）自動產生於 "
+        f"{datetime.now(timezone.utc).isoformat()}_",
+    ]
+    return "\n".join(parts)
