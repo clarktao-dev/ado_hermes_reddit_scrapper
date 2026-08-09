@@ -368,30 +368,98 @@ def _fetch_google_news_text(item, delay_sec: float = 1.0) -> Optional[str]:
     return text
 
 
-# Paywall URL patterns (Task 12). These are the well-known paid-content
-# URL prefixes used by major German publishers. Each entry maps a substring
-# to a human-readable reason that we log + persist on the item.
+# Paywall URL patterns (Task 12 + Task 13, 2026-08-09).
+#
+# Two complementary detection strategies. They are *helpers* — the late
+# char-count + publisher-hint pass still runs as the safety net (Task 12).
+#
+# 1. ``_PAYWALL_URL_PATTERNS`` — substring scan, cheap. Catches FAZ+
+#    ("/premium/"), Handelsblatt-style ("/-/"), generic markers
+#    ("/paywall/", "/epaper/"). Note: WELT+ and Spiegel+ use a
+#    different shape (see below) so they don't appear here.
+#
+# 2. ``_PAYWALL_HOST_BLACKLIST`` — exact domain match against a known
+#    list of publishers whose content is always (or near-always) behind
+#    a paywall: WELT+, Spiegel+, Manager Magazin, Handelsblatt paid tier,
+#    FAZ+, WiWo+, ZEIT+. We match the host portion of the URL. Any URL
+#    on these hosts is treated as paywalled, no need to inspect the
+#    path — the publisher doesn't publish free content.
+#
+# 3. ``_PAYWALL_PATH_REGEXES`` — pattern check on the URL path
+#    component. Catches the WELT+ shape ("/plus6a..." / "/plus7b..." —
+#    plus glued to a hex prefix, no closing slash) and the Spiegel+ /
+#    Manager Magazin shape ("/a-{uuid}" — a literal 'a-' followed by an
+#    article UUID). Each entry is a compiled regex.
+
+import re
+
 _PAYWALL_URL_PATTERNS = [
-    ("/plus/", "WELT+ / Spiegel+"),       # WELT+, Spiegel+
-    ("/-/", "Handelsblatt+"),              # Handelsblatt paid tier
     ("/premium/", "FAZ+"),                # FAZ paid tier
     ("/paywall/", "explicit-paywall"),
     ("/epaper/", "epaper-only"),
 ]
 
+# Publishers whose content is always / nearly always paywalled.
+# We only match the host portion so we don't accidentally catch
+# subdomains that publish free content (e.g. zeit.de/magazin/...).
+_PAYWALL_HOST_BLACKLIST = {
+    "www.welt.de":            "WELT+",          # plus.welt.de premium tier
+    "welt.de":                "WELT+",
+    "www.spiegel.de":         "Spiegel+",       # spiegel-plus premium tier
+    "www.manager-magazin.de": "Manager-Magazin+",
+    "www.handelsblatt.com":   "Handelsblatt+",  # mostly paid
+    "www.faz.net":            "FAZ+",           # /premium/ paths but blacklist as safety
+    "www.wiwo.de":            "WiWo+",          # many paid articles
+    "www.zeit.de":            "ZEIT+",          # zeit-plus premium
+}
+
+# Regex patterns on the path. These catch specific paywall URL shapes
+# that the host blacklist misses (e.g. Google News decoded URLs that
+# are hosted on www.welt.de but already covered above; or any path-shape
+# that indicates paywall even on an unlisted host).
+_PAYWALL_PATH_REGEXES = [
+    (re.compile(r"/plus[A-Za-z0-9]+"), "WELT+-hex"),   # /plus6a37f069...
+    (re.compile(r"/-a-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
+     "Spiegel+/MM-uuid"),                                # /a-fda65d69-8781-4cb4-... uuid
+]
+
 
 def _is_paywalled_url(url: str) -> bool:
-    """Return True if ``url`` matches a known paywall URL pattern.
+    """Return True if ``url`` matches any known paywall signal.
 
-    Cheap substring scan — runs BEFORE HTTP fetch so we don't waste
-    bandwidth on pages we know will be blocked.
+    Three-layer check (Task 13):
+    1. **Path substring scan** — cheap; matches ``/premium/`` etc.
+    2. **Host blacklist** — matches publishers where all content is paid.
+    3. **Path regex** — matches paywall URL shapes (``/plus6...``,
+       ``/a-{uuid}``) on hosts that aren't in the blacklist.
+
+    Runs BEFORE HTTP fetch (called by :func:`_fetch_google_news_text`)
+    so we don't waste bandwidth on pages we know will be blocked.
+    The late char-count + publisher-hint pass is still the safety net.
     """
     if not url:
         return False
     u = url.lower()
+
+    # Layer 1: path substring patterns.
     for pat, _reason in _PAYWALL_URL_PATTERNS:
         if pat in u:
             return True
+
+    # Layer 2: host blacklist.
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(url).hostname or ""
+    except Exception:
+        host = ""
+    if host in _PAYWALL_HOST_BLACKLIST:
+        return True
+
+    # Layer 3: path regex (catches paywall URL shapes on unlisted hosts).
+    for rx, _reason in _PAYWALL_PATH_REGEXES:
+        if rx.search(u):
+            return True
+
     return False
 
 
@@ -413,11 +481,33 @@ def step_fetch_full_text(items, delay_sec=1.0):
     pattern (WELT+ / Spiegel+ / FAZ+) or post-fetch char count (<1000).
     Such items are dropped here so LLM tokens aren't wasted translating a
     "this article is paywalled" stub.
+
+    Paywall handling for RSS sources (Task 13, 2026-08-09): ``rss_fetch``'s
+    ``fetch_full_text_for_items`` flags paywall via URL/content heuristics
+    but does NOT drop the item — it returns the truncated body anyway.
+    We post-process the result here so that RSS items on the paywall host
+    blacklist (Spiegel, WELT, Manager Magazin, etc.) are also dropped
+    instead of being translated into a "sorry, this is paywalled" stub.
     """
     keep = []
     skipped_paywall = 0
     skipped_empty = 0
     for it in items:
+        # Layer 0 (Task 13): pre-flight paywall check on the URL for ALL
+        # items, including RSS sources whose RSS <link> already points at
+        # the publisher URL (e.g. Spiegel Wirtschaft RSS → spiegel.de).
+        # This catches items before we even fire an HTTP request.
+        item_url = it.get("url", "")
+        if _is_paywalled_url(item_url):
+            it["_paywalled"] = True
+            it["_paywall_reason"] = "rss-url-pattern"
+            skipped_paywall += 1
+            logger.info(
+                "[paywall-detected] rss-url-pattern | %s | %s",
+                item_url[:80], it.get("title", "")[:50],
+            )
+            continue
+
         if it.get("no_full_text"):
             full_text = _fetch_google_news_text(it, delay_sec=delay_sec)
             if full_text == "<PAYWALLED>":
@@ -437,10 +527,32 @@ def step_fetch_full_text(items, delay_sec=1.0):
         else:
             keep.append(it)
     if skipped_paywall:
-        logger.info("[no_full_text] dropped %d paywalled item(s)", skipped_paywall)
+        logger.info("[paywall] dropped %d item(s) at fetch stage", skipped_paywall)
     if skipped_empty:
         logger.info("[no_full_text] skipped %d item(s) with empty content", skipped_empty)
-    return rss_fetch.fetch_full_text_for_items(keep, delay_sec=delay_sec)
+
+    result = rss_fetch.fetch_full_text_for_items(keep, delay_sec=delay_sec)
+    # Layer 2 (Task 13): post-fetch, drop RSS items that rss_fetch
+    # itself flagged as paywalled (e.g. via its paywall-hint heuristics
+    # like cookie banners, "abonnement" body text, etc.). Without this,
+    # a host we DIDN'T blacklist (like Boersen-News or a regional
+    # outlet) could slip through and waste LLM tokens.
+    final = []
+    extra_dropped = 0
+    for it in result:
+        if it.get("_paywalled") or it.get("paywalled_flag"):
+            extra_dropped += 1
+            logger.info(
+                "[paywall-detected] rss_fetch hint | %s | %s",
+                it.get("url", "")[:80], it.get("title", "")[:50],
+            )
+            continue
+        final.append(it)
+    if extra_dropped:
+        logger.info(
+            "[paywall] dropped %d more item(s) via rss_fetch hint", extra_dropped
+        )
+    return final
 
 
 def step_translate(items, chunk_size=2):
