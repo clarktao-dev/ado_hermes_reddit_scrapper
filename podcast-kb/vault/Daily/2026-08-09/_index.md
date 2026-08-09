@@ -4,4 +4,4 @@
 
 | 頻道 | 標題 | 摘要 |
 | --- | --- | --- |
-| Finanztip | [Should you use Scalable Capital & Trade Republic for your savings?](https://www.youtube.com/watch?v=dQDRnxqaV2U) | 本集 Finanztip 影片由主持人 Am Saidi 主講，針對德國兩大新興券商 Trade Republic 與 Scalable Capital 推出的 |
+| Finanztip | [FGE539 4K Long-term investing despite climate change](https://www.youtube.com/watch?v=0b5OEGjLfeU) | 本集 Finanztip 影片深入探討氣候變遷對長期投資的影響，回應觀眾 Ang 提出的核心問題：「氣候危機是否會對我們的投資與經濟成長產生長期負面影響？」主持 |
