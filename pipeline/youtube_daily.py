@@ -82,15 +82,38 @@ def load_channels() -> list:
     return [c for c in data.get("channels", []) if c.get("enabled", True)]
 
 
+# Persistent run counter for round-robin channel rotation (Task 9).
+# Stored as a plain text file so the counter survives across runs in the
+# same week, regardless of whether the run is cron-triggered or manual.
+RUN_COUNTER_PATH = "/tmp/youtube_daily_run_count"
+
+
+def _read_run_counter() -> int:
+    """Return the previous run count, or 0 if the file is missing/corrupt."""
+    try:
+        return int(Path(RUN_COUNTER_PATH).read_text().strip() or "0")
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
+def _write_run_counter(n: int) -> None:
+    Path(RUN_COUNTER_PATH).write_text(str(n))
+
+
 def pick_channels(channels: list, n: int = 3) -> list:
-    """Round-robin by day-of-year: pick n consecutive channels starting at
-    (today.doy % len(channels)). This gives a deterministic rotation that
-    covers every channel every (len / n) days.
+    """Round-robin by run count: pick n consecutive channels starting at
+    (run_count % len(channels)). This rotates every time the pipeline runs
+    (not just every day), so running twice in the same day hits different
+    channels than the first run.
+
+    The run counter is incremented and persisted after each call so the
+    next run starts from a different offset.
     """
     if n >= len(channels):
         return list(channels)
-    doy = datetime.now(timezone.utc).timetuple().tm_yday
-    start = doy % len(channels)
+    counter = _read_run_counter()
+    start = counter % len(channels)
+    _write_run_counter(counter + 1)
     return [channels[(start + i) % len(channels)] for i in range(n)]
 
 
@@ -229,12 +252,19 @@ def pick_video_for_channel(
     store: ProcessedStore,
     state: youtube_state.StateStore | None = None,
     look_back: int = 10,
-) -> youtube_fetch.VideoMeta | None:
-    """List videos and find the newest unprocessed one (walking back).
+) -> list[youtube_fetch.VideoMeta]:
+    """List videos and return ALL unprocessed candidates (newest first).
 
     Dedup is checked against the ProcessedStore (Airtable). When state.json
     still has records not yet migrated to Airtable, those are also respected
     (backward compat).
+
+    Returns a LIST (not a single VideoMeta) so the caller can retry with the
+    next candidate if the current one fails (e.g. empty transcript from a
+    paywalled member video). Task 9: a single empty-transcript video should
+    not abort the whole run — caller walks through the list.
+
+    The returned list is capped at ``look_back`` items.
     """
     metas = youtube_fetch.list_channel_videos(
         channel_id=channel["id"],
@@ -243,6 +273,7 @@ def pick_video_for_channel(
         youtube_channel_id=channel.get("channel_id"),
         limit=look_back,
     )
+    candidates: list[youtube_fetch.VideoMeta] = []
     for m in metas:
         # Primary check: Airtable ledger.
         if store.is_processed("youtube", m.id):
@@ -259,8 +290,8 @@ def pick_video_for_channel(
                 channel["id"], m.id,
             )
             continue
-        return m
-    return None
+        candidates.append(m)
+    return candidates
 
 
 def push_to_github(repo_root: str, dry_run: bool) -> dict:
@@ -500,7 +531,12 @@ def main() -> int:
             print(f"\n  [cooldown] sleeping {cooldown}s before next channel...")
             time.sleep(cooldown)
         print(f"\n=== {ch['name']} ({ch['id']}) ===")
+        # Walk through unprocessed candidates until one yields a usable
+        # transcript (Task 9). Previously a single empty-transcript video
+        # (e.g. paywalled member content) would abort the channel; now we
+        # try the next candidate.
         v: youtube_fetch.VideoMeta | None = None
+        candidates: list[youtube_fetch.VideoMeta] = []
         if forced_video is not None and i == 0:
             # --video-id still respects the ledger unless --force is given.
             if store is not None and store.is_processed("youtube",
@@ -520,16 +556,35 @@ def main() -> int:
                 v = forced_video
                 logger.info("using forced video: %s", v.id)
         elif store is not None:
-            v = pick_video_for_channel(ch, store=store, state=state)
+            candidates = pick_video_for_channel(ch, store=store, state=state)
+            if candidates:
+                v = candidates[0]
         else:
-            v = _legacy_pick(ch, state)
+            legacy_v = _legacy_pick(ch, state)
+            if legacy_v is not None:
+                candidates = [legacy_v]
+                v = legacy_v
         if v is None:
             print(f"  [skip] no unprocessed video found in latest {10}")
             continue
-        print(f"  [fetch] {v.id} | {v.title[:60]} ({v.duration_sec}s)")
-        tr = youtube_fetch.fetch_transcript(v)
-        if not tr.text:
-            print(f"  [warn] empty transcript (lang={tr.language}); skip")
+        # Try the chosen video first; if transcript is empty, walk to next.
+        idx = 0
+        tr = None
+        while v is not None:
+            print(f"  [fetch] {v.id} | {v.title[:60]} ({v.duration_sec}s)")
+            tr = youtube_fetch.fetch_transcript(v)
+            if tr.text:
+                break  # got a usable transcript
+            print(f"  [warn] empty transcript (lang={tr.language}); "
+                  f"trying next candidate")
+            idx += 1
+            if idx >= len(candidates):
+                print(f"  [skip] exhausted {len(candidates)} candidate(s) "
+                      f"in {ch['id']}; none had transcripts")
+                v = None
+                break
+            v = candidates[idx]
+        if v is None or tr is None or not tr.text:
             continue
         print(f"  [transcript] {tr.n_chars} chars (premium={tr.is_premium})")
         if args.mode == "short":

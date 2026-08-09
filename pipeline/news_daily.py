@@ -116,43 +116,36 @@ def filter_processed(
 
     1. ``url_normalized`` is set (strip ``utm_*`` / ``fbclid`` / ``gclid``,
        lowercase host, sort query).
-    2. If the normalized URL is already in the ledger → **skip**.
-    3. If any news item was processed in the past ``days_threshold`` days
-       (per spec: 3) → **skip** the entire batch. This is the
-       "don't reprocess the same wave twice in a row" guard.
+    2. If the normalized URL is already in the ledger → **skip** (exact
+       dedup; this is the only gate — the previous "any news in past
+       N days" batch gate was removed in Task 9).
 
     Items without a URL pass through unchanged.
 
     Returns the kept list. Mutates input dicts in place to add
     ``url_normalized`` on the kept items (so downstream code can hash
     the same value when calling ``mark_processed``).
+
+    .. note::
+       The ``days_threshold`` parameter is kept for backwards compatibility
+       with callers; it is no longer used internally (no batch gate).
     """
     if store is None:
         store = _get_store()
     kept: List[dict] = []
     skipped_exact = 0
-    skipped_recent = 0
     skipped_no_url = 0
 
-    # Probe the recent-news gate ONCE per call (not per item) — this is the
-    # "any news processed in last N days" guard. The spec asks for it, and
-    # probing per-item would also be correct but wastes an Airtable round-trip
-    # per row.
-    try:
-        recent_records = store.get_recent(source_type="news", days=days_threshold)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "get_recent(news, days=%d) failed (%s) — recent-news gate disabled",
-            days_threshold, e,
-        )
-        recent_records = []
-    recent_window_open = bool(recent_records)
-    if recent_window_open:
-        logger.info(
-            "recent-news gate active: %d news records in past %d days → "
-            "all incoming items will be skipped (per spec)",
-            len(recent_records), days_threshold,
-        )
+    # Dedup is now EXACT-URL-ONLY (Task 9, 2026-08-09).
+    # The previous "any news in past N days → skip all" gate was removed
+    # because it meant once the pipeline ran once, every subsequent run
+    # in that window would skip all *new* items too — which defeats the
+    # user's intent of "process new articles each run". The max_days gate
+    # (Step 4b age filter) still drops old news; URL dedup blocks the
+    # exact article from being processed twice.
+    # `days_threshold` is kept in the signature for backwards compatibility
+    # with existing callers; it is no longer used internally.
+    _ = days_threshold  # intentionally unused
 
     for item in items:
         url = (item.get("url") or "").strip()
@@ -164,7 +157,7 @@ def filter_processed(
         normalized = normalize_url(url)
         item["url_normalized"] = normalized
 
-        # (a) Exact-match dedup via Airtable ledger.
+        # Exact-match dedup via Airtable ledger.
         if store.is_processed("news", normalized):
             skipped_exact += 1
             logger.info(
@@ -173,24 +166,11 @@ def filter_processed(
             )
             continue
 
-        # (b) Recent-news gate — if anything news was processed in the last
-        # `days_threshold` days, treat the whole batch as already-covered.
-        # This is the spec's "don't fetch twice in 3 days" guard.
-        if recent_window_open:
-            skipped_recent += 1
-            logger.info(
-                "[skip recent-news] %s (have %d news in past %dd)",
-                normalized, len(recent_records), days_threshold,
-            )
-            continue
-
         kept.append(item)
 
     logger.info(
-        "filter_processed: %d kept, %d skipped(exact), %d skipped(recent), "
-        "%d skipped(no-url) | days_threshold=%d",
-        len(kept), skipped_exact, skipped_recent, skipped_no_url,
-        days_threshold,
+        "filter_processed: %d kept, %d skipped(exact), %d skipped(no-url)",
+        len(kept), skipped_exact, skipped_no_url,
     )
     return kept
 
@@ -709,7 +689,7 @@ def step_update_side_effects(
 # --------------------------------------------------------------------------- #
 
 def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
-                 max_days=3, quota_primary=8, quota_other=3,
+                 max_days=7, quota_primary=8, quota_other=3,
                  min_relevance=5, min_quick_score=6,
                  skip_store=False, pipeline_run_id="",
                  mode: str = "short"):
@@ -873,7 +853,7 @@ def main():
                         "prompt small (~10K tokens total for 5K-char full_text × 2) "
                         "which avoids ollama-cloud hangs. chunk=4/8 produced prompts "
                         "large enough to silently hang. Slower per-batch but reliable.")
-    p.add_argument("--max-days", type=int, default=3,
+    p.add_argument("--max-days", type=int, default=7,
                    help="Only include items published within the last N days. "
                         "0 disables age filtering. Also drives filter_processed's "
                         "recent-news window.")

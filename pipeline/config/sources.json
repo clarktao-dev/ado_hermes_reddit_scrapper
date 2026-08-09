@@ -42,6 +42,13 @@
       "url": "https://www.tagesschau.de/wirtschaft/finanzen/index~rss2.xml",
       "enabled": true,
       "priority": 6
+    },
+    {
+      "id": "iz_de",
+      "name": "Immobilien Zeitung (IZ.de)",
+      "url": "https://www.iz.de/news/feed",
+      "enabled": true,
+      "priority": 7
     }
   ]
 }
