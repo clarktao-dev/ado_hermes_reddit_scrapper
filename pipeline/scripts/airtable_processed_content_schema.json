@@ -1,0 +1,132 @@
+{
+  "_comment": "ProcessedContent table schema spec. Consumed by scripts/setup_airtable_processed_content.py to provision the table once AIRTABLE_API_KEY is configured. PM-approved 2026-08-09.",
+  "base_name": "Pipelines",
+  "table_name": "ProcessedContent",
+  "primary_field": "source_hash",
+  "default_sort": [
+    {"field": "processed_at", "direction": "desc"}
+  ],
+  "fields": [
+    {
+      "name": "source_hash",
+      "type": "singleLineText",
+      "required": true,
+      "description": "SHA256 hash of '<source_type>:<source_id>'. Dedup key. Primary field."
+    },
+    {
+      "name": "source_type",
+      "type": "singleSelect",
+      "required": true,
+      "options": ["youtube", "news", "reddit", "podcast"],
+      "description": "Source platform family."
+    },
+    {
+      "name": "source_id",
+      "type": "singleLineText",
+      "required": true,
+      "description": "Platform-native ID (e.g. YouTube video ID, news URL slug, Reddit post ID)."
+    },
+    {
+      "name": "title",
+      "type": "singleLineText",
+      "required": true,
+      "description": "Item title at time of processing."
+    },
+    {
+      "name": "channels",
+      "type": "multipleSelects",
+      "required": false,
+      "options": [
+        "youtube.ex_makler",
+        "youtube.1alage",
+        "youtube.marktcheck",
+        "youtube.mrsteuer",
+        "youtube.finanztip",
+        "news.daily_top3",
+        "reddit.r_immobilien",
+        "reddit.r_germany",
+        "reddit.r_de"
+      ],
+      "description": "Channels that picked up this item. Wildcard 'reddit.*' is convention only — concrete channels enumerated here."
+    },
+    {
+      "name": "first_seen_at",
+      "type": "dateTime",
+      "required": true,
+      "options": {
+        "dateFormat": {"name": "iso", "format": "YYYY-MM-DD"},
+        "timeFormat": {"name": "24hour", "format": "HH:mm"},
+        "timeZone": "utc"
+      },
+      "description": "When this source was first observed by the pipeline."
+    },
+    {
+      "name": "processed_at",
+      "type": "dateTime",
+      "required": true,
+      "options": {
+        "dateFormat": {"name": "iso", "format": "YYYY-MM-DD"},
+        "timeFormat": {"name": "24hour", "format": "HH:mm"},
+        "timeZone": "utc"
+      },
+      "description": "When downstream processing completed."
+    },
+    {
+      "name": "pipeline_run_id",
+      "type": "singleLineText",
+      "required": false,
+      "description": "Identifier of the pipeline run that produced this record."
+    },
+    {
+      "name": "output_path",
+      "type": "singleLineText",
+      "required": false,
+      "description": "Local / vault path to the produced artifact (markdown, etc.)."
+    },
+    {
+      "name": "metadata",
+      "type": "multilineText",
+      "required": false,
+      "description": "Free-form JSON blob. Channel-specific context, raw scores, etc."
+    },
+    {
+      "name": "tags",
+      "type": "multipleSelects",
+      "required": false,
+      "options": [
+        "long-form",
+        "shorts-suspect",
+        "failed-transcript",
+        "restored",
+        "migrated-from-state"
+      ],
+      "description": "Operational tags applied by the pipeline."
+    },
+    {
+      "name": "discord_message_id",
+      "type": "singleLineText",
+      "required": false,
+      "description": "Side-effect: Discord message ID created when this item was announced."
+    },
+    {
+      "name": "github_commit_sha",
+      "type": "singleLineText",
+      "required": false,
+      "description": "Side-effect: GitHub commit SHA that pushed the artifact to the repo."
+    }
+  ],
+  "views": [
+    {
+      "name": "Grid — All",
+      "description": "Default grid view, all records, sorted by processed_at desc."
+    },
+    {
+      "name": "By source_type",
+      "description": "Group by source_type, then sort by processed_at desc."
+    },
+    {
+      "name": "Recent 7 days",
+      "description": "Filter processed_at > 7 days ago; sort by processed_at desc."
+    }
+  ]
+}
