@@ -280,7 +280,19 @@ def _fetch_google_news_text(item, delay_sec: float = 1.0) -> Optional[str]:
     fetch the publisher article body. Falls back to RSS title + summary
     if decode or fetch fails.
 
-    Returns the full article body as a string, or None if every path failed.
+    Paywall detection (Task 12, 2026-08-09): we inspect the decoded URL
+    for known paid-content markers BEFORE the HTTP fetch. If a match is
+    found, we set ``item['_paywalled'] = True`` and return a sentinel
+    string ``"<PAYWALLED>"`` so the caller can drop the item rather than
+    wasting LLM tokens on a "sorry, this article is paywalled" summary.
+
+    Two detection passes:
+    1. URL pattern (``/plus/`` for WELT+ / Spiegel+, ``/_-`` for
+       Handelsblatt+, ``/premium/`` for FAZ+) — cheap and definitive
+       when the marker is present.
+    2. Post-fetch char count (``full_text_chars < 1000``) — catches
+       generic paywalls where the publisher doesn't URL-tag (e.g. some
+       WiWo/Morgenpost articles).
     """
     raw_url = item.get("url")
     title = item.get("title") or ""
@@ -303,10 +315,21 @@ def _fetch_google_news_text(item, delay_sec: float = 1.0) -> Optional[str]:
     if not decoded_url or decoded_url == raw_url:
         return fallback or None
 
-    # Cache the decoded URL on the item so dedup re-runs hit the same key.
+    # Cache the decoded URL on the item so dedup re-runs hit the same key
+    # AND so step_mark_processed can persist it as source_url (Task 12c).
     item["url"] = decoded_url
     item["_decoded_url"] = decoded_url
     item["_original_gn_url"] = raw_url
+
+    # ─── Paywall pass 1: URL pattern (early detection, before HTTP) ────
+    if _is_paywalled_url(decoded_url):
+        item["_paywalled"] = True
+        item["_paywall_reason"] = "url-pattern"
+        logger.info(
+            "[paywall-detected] url-pattern skip | %s | %s",
+            decoded_url[:80], title[:50],
+        )
+        return "<PAYWALLED>"
 
     if delay_sec > 0:
         time.sleep(delay_sec)
@@ -319,10 +342,57 @@ def _fetch_google_news_text(item, delay_sec: float = 1.0) -> Optional[str]:
         return fallback or None
 
     text = result.get("full_text") or ""
+    char_count = result.get("char_count") or len(text)
+    publisher_paywalled = result.get("paywalled", False)
+    had_paywall_hint = result.get("had_paywall_hint", False)
+
+    # ─── Paywall pass 2: char count + publisher paywall hint ────────────
+    # Some legitimate short news (e.g. mini briefs) are under 1000 chars;
+    # but if rss_fetch ALSO flagged paywalled or saw a paywall hint, that's
+    # a much stronger signal — drop unconditionally. Otherwise 1000 is a
+    # safe threshold for German full-length real-estate articles.
+    if publisher_paywalled or had_paywall_hint or char_count < 1000:
+        item["_paywalled"] = True
+        item["_paywall_reason"] = (
+            "publisher-hint" if (publisher_paywalled or had_paywall_hint)
+            else "short-content"
+        )
+        logger.info(
+            "[paywall-detected] %s (%d chars) | %s",
+            item["_paywall_reason"], char_count, decoded_url[:80],
+        )
+        return "<PAYWALLED>"
+
     if len(text) < 100:
-        # Some pages are paywalled or have JS-only rendering — fall back.
         return fallback or None
     return text
+
+
+# Paywall URL patterns (Task 12). These are the well-known paid-content
+# URL prefixes used by major German publishers. Each entry maps a substring
+# to a human-readable reason that we log + persist on the item.
+_PAYWALL_URL_PATTERNS = [
+    ("/plus/", "WELT+ / Spiegel+"),       # WELT+, Spiegel+
+    ("/-/", "Handelsblatt+"),              # Handelsblatt paid tier
+    ("/premium/", "FAZ+"),                # FAZ paid tier
+    ("/paywall/", "explicit-paywall"),
+    ("/epaper/", "epaper-only"),
+]
+
+
+def _is_paywalled_url(url: str) -> bool:
+    """Return True if ``url`` matches a known paywall URL pattern.
+
+    Cheap substring scan — runs BEFORE HTTP fetch so we don't waste
+    bandwidth on pages we know will be blocked.
+    """
+    if not url:
+        return False
+    u = url.lower()
+    for pat, _reason in _PAYWALL_URL_PATTERNS:
+        if pat in u:
+            return True
+    return False
 
 
 def step_fetch_full_text(items, delay_sec=1.0):
@@ -335,18 +405,26 @@ def step_fetch_full_text(items, delay_sec=1.0):
     Items whose source declares ``"no_full_text": true`` (e.g. Google News,
     whose RSS <link> is a redirect URL) are special-cased: we run them
     through ``google-news-api`` ``decode_url`` to extract the real publisher
-    URL (Spiegel, WELT, etc.), then fetch that. If decode fails we fall
-    back to RSS title + summary as content. Items with combined title +
-    summary under 30 chars are dropped — translation cannot work without
-    content.
+    URL (Spiegel, WELT, etc.), then fetch that. If decode or fetch fails,
+    we drop the item (rather than fall back to title+summary — Task 12).
+
+    Paywall handling (Task 12, 2026-08-09): ``_fetch_google_news_text``
+    returns ``"<PAYWALLED>"`` if it detects a known paywall via URL
+    pattern (WELT+ / Spiegel+ / FAZ+) or post-fetch char count (<1000).
+    Such items are dropped here so LLM tokens aren't wasted translating a
+    "this article is paywalled" stub.
     """
     keep = []
-    skipped = 0
+    skipped_paywall = 0
+    skipped_empty = 0
     for it in items:
         if it.get("no_full_text"):
             full_text = _fetch_google_news_text(it, delay_sec=delay_sec)
+            if full_text == "<PAYWALLED>":
+                skipped_paywall += 1
+                continue  # drop silently; don't translate
             if not full_text or len(full_text) < 30:
-                skipped += 1
+                skipped_empty += 1
                 logger.info(
                     "[skip no-full-text empty] %s | %s",
                     it.get("source_name"), it.get("title", "")[:60],
@@ -358,8 +436,10 @@ def step_fetch_full_text(items, delay_sec=1.0):
             keep.append(it)
         else:
             keep.append(it)
-    if skipped:
-        logger.info("[no_full_text] skipped %d item(s) with empty content", skipped)
+    if skipped_paywall:
+        logger.info("[no_full_text] dropped %d paywalled item(s)", skipped_paywall)
+    if skipped_empty:
+        logger.info("[no_full_text] skipped %d item(s) with empty content", skipped_empty)
     return rss_fetch.fetch_full_text_for_items(keep, delay_sec=delay_sec)
 
 
@@ -397,7 +477,7 @@ def step_rank(items):
 _DEFAULT_QUOTAS = {
     "Handelsblatt Immobilien": 8,
 }
-_DEFAULT_OTHER_QUOTA = 3
+_DEFAULT_OTHER_QUOTA = 5
 
 
 def filter_by_age(items, max_days):
@@ -657,7 +737,14 @@ def step_push_github(dry_run):
 # --------------------------------------------------------------------------- #
 
 def _build_news_metadata(item: dict, date_str: str) -> dict:
-    """Build the metadata JSON for :func:`ProcessedStore.mark_processed`."""
+    """Build the metadata JSON for :func:`ProcessedStore.mark_processed`.
+
+    Task 12 (2026-08-09) also persists ``decoded_url`` (the real publisher
+    URL after Google News ``decode_url``) and ``paywalled`` (whether the
+    item was dropped at fetch time). Without these fields, you can't tell
+    from the Airtable ledger whether a record came from a paywalled
+    publisher or what the real article URL was.
+    """
     epoch = item.get("pub_date_epoch")
     if epoch is None and isinstance(item.get("pub_date"), str):
         try:
@@ -666,7 +753,7 @@ def _build_news_metadata(item: dict, date_str: str) -> dict:
             ).timestamp())
         except Exception:  # noqa: BLE001
             epoch = None
-    return {
+    meta = {
         "epoch": epoch,
         "source": item.get("source_name", "?"),
         "lang": item.get("source_language", "de"),
@@ -674,6 +761,15 @@ def _build_news_metadata(item: dict, date_str: str) -> dict:
         "relevance_to_buyer": item.get("relevance_to_buyer"),
         "date": date_str,
     }
+    # Task 12: capture decoded real publisher URL + paywall metadata.
+    if item.get("_decoded_url"):
+        meta["decoded_url"] = item["_decoded_url"]
+    if item.get("_original_gn_url"):
+        meta["original_gn_url"] = item["_original_gn_url"]
+    if item.get("_paywalled"):
+        meta["paywalled"] = True
+        meta["paywall_reason"] = item.get("_paywall_reason", "unknown")
+    return meta
 
 
 def step_mark_processed(
@@ -983,7 +1079,7 @@ def main():
     p.add_argument("--quota-primary", type=int, default=8,
                    help="Max items per run from primary source (Handelsblatt). "
                         "0 disables source quota.")
-    p.add_argument("--quota-other", type=int, default=3,
+    p.add_argument("--quota-other", type=int, default=5,
                    help="Max items per run from each other source.")
     p.add_argument("--min-relevance", type=int, default=3,
                    help="Drop items whose LLM-assigned relevance_to_buyer is "
