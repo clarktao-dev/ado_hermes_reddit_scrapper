@@ -253,8 +253,37 @@ def step_fetch_full_text(items, delay_sec=1.0):
     Runs AFTER dedup + age filter, BEFORE translate — so only the items that
     actually need translation (5-15 items) trigger an HTTP request, not the
     raw 150+ RSS entries.
+
+    Items whose source declares ``"no_full_text": true`` (e.g. Google News,
+    whose URLs are redirects that hit a consent page) skip the HTTP fetch
+    and rely on RSS title + summary alone. If those two fields are both
+    empty, the item is dropped — translation cannot work without content.
     """
-    return rss_fetch.fetch_full_text_for_items(items, delay_sec=delay_sec)
+    keep = []
+    skipped = 0
+    for it in items:
+        if it.get("no_full_text"):
+            # Use RSS title + summary as the entire content. Drop empty.
+            html_or_text = " ".join([
+                (it.get("title") or ""),
+                (it.get("summary") or ""),
+            ]).strip()
+            if len(html_or_text) < 30:
+                skipped += 1
+                logger.info(
+                    "[skip no-full-text empty] %s | %s",
+                    it.get("source_name"), it.get("title", "")[:60],
+                )
+                continue
+            it["full_text"] = html_or_text
+            it["content_html"] = html_or_text
+            it["_fetch_done"] = True  # mark so fetch_full_text_for_items skips
+            keep.append(it)
+        else:
+            keep.append(it)
+    if skipped:
+        logger.info("[no_full_text] skipped %d item(s) with empty title+summary", skipped)
+    return rss_fetch.fetch_full_text_for_items(keep, delay_sec=delay_sec)
 
 
 def step_translate(items, chunk_size=2):
@@ -745,6 +774,22 @@ def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
         items = filter_by_age(items, max_days)
         print(f"  age filter (≤ {max_days}d): {before} → {len(items)} items", flush=True)
 
+    # Step 4b': apply source quota EARLY (Task 10, 2026-08-09) — without this,
+    # Google News alone can flood the pipeline with 30+ items and balloon
+    # translate time / token usage. Cap per-source BEFORE full-text fetch
+    # and translation so we don't waste work on items that will be dropped.
+    if quota_primary > 0 or quota_other > 0:
+        before = len(items)
+        items = apply_source_quota(
+            items,
+            primary_max=quota_primary,
+            other_max=quota_other,
+        )
+        from collections import Counter as _C
+        dist = _C(it.get("source_name", "?") for it in items)
+        print(f"  source quota (primary≤{quota_primary}, other≤{quota_other}): "
+              f"{before} → {len(items)} items | {dict(dist)}", flush=True)
+
     # Step 4c: fetch full article body (only for items that survived every
     # gate so far — typically 5-15 items, not the raw 150+ RSS entries).
     items = _step("4c. fetch_full_text",
@@ -766,8 +811,9 @@ def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
     for i, it in enumerate(items):
         it["relevance_rank"] = i + 1
 
-    # Step 6b: apply source quota (per-source upper cap; final relevance
-    # judgement is the LLM's --min-relevance, not a forced minimum floor).
+    # Step 6b (legacy): keep a no-op quota pass for callers that disabled
+    # the Step 4b' early quota. Step 4b' already enforces the cap; this
+    # pass is a no-op when items are already within quota.
     if quota_primary > 0 or quota_other > 0:
         before = len(items)
         items = apply_source_quota(
@@ -777,7 +823,7 @@ def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
         )
         from collections import Counter as _C
         dist = _C(it.get("source_name", "?") for it in items)
-        print(f"  source quota (primary≤{quota_primary}, other≤{quota_other}): "
+        print(f"  source quota re-check (no-op expected): "
               f"{before} → {len(items)} items | {dict(dist)}", flush=True)
 
     # Print a dry-run summary so --dry-run is verifiable without side effects.

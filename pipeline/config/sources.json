@@ -44,11 +44,13 @@
       "priority": 6
     },
     {
-      "id": "iz_de",
-      "name": "Immobilien Zeitung (IZ.de)",
-      "url": "https://www.iz.de/news/feed",
+      "id": "google_news_immobilien",
+      "name": "Google News (Immobilien)",
+      "url": "https://news.google.com/rss/search?q=Immobilien+OR+Wohnung+OR+Mietrecht+OR+Baufinanzierung+OR+Eigentumswohnung+when:7d&hl=de&gl=DE&ceid=DE:de",
       "enabled": true,
-      "priority": 7
+      "priority": 7,
+      "no_full_text": true,
+      "notes": "Google News RSS uses Google redirect URLs; full-text fetch hits the consent page. Pipeline uses title + RSS summary only. Drop item if both empty."
     }
   ]
 }

@@ -58,6 +58,7 @@ def _extract_items_atom(xml_bytes, source):
 
 def _extract_items_rss(xml_bytes, source):
     """RSS 2.0: <item><title><link><pubDate><description>..."""
+    no_full_text = bool(source.get("no_full_text"))
     out = []
     for m in re.finditer(rb"<item>(.*?)</item>", xml_bytes, re.DOTALL):
         block = m.group(1).decode("utf-8", errors="replace")
@@ -78,6 +79,7 @@ def _extract_items_rss(xml_bytes, source):
             "pub_date": _parse_pub_date(pub_m.group(1) if pub_m else None),
             "summary": re.sub(r"<[^>]+>", " ", (desc_m.group(1) if desc_m else "")).strip()[:500],
             "content_html": (content_m.group(1) if content_m else (desc_m.group(1) if desc_m else "")).strip(),
+            "no_full_text": no_full_text,
         })
     return out
 
@@ -210,10 +212,18 @@ def fetch_full_text_for_items(items, delay_sec: float = 1.0,
         item['full_text_chars'] = int
         item['full_text_paywalled'] = bool
         item['full_text_error'] = str|None
+    Items already flagged ``_fetch_done=True`` (e.g. by ``step_fetch_full_text``
+    for ``no_full_text`` sources like Google News) are skipped — their
+    ``full_text`` was populated from RSS title + summary directly.
     Returns the input list for chaining. Sleeps `delay_sec` between requests
     to avoid bursting the source servers.
     """
     for i, it in enumerate(items):
+        if it.get("_fetch_done"):
+            if verbose:
+                print(f"[fulltext] {i+1}/{len(items)} {it.get('source_name','?'):28} "
+                      f"{len(it.get('full_text') or ''):>5} chars (skipped, RSS-only)")
+            continue
         url = it.get("url")
         result = fetch_full_text(url)
         it["full_text"] = result["full_text"]
