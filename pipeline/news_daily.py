@@ -247,6 +247,84 @@ def step_dedup(items, *, skip_store: bool = False, days_threshold: int = 3):
     return filter_processed(items, days_threshold=days_threshold)
 
 
+# Module-level lazy singleton for the Google News decoder.
+# google-news-api internally uses httpx + a rate limiter; instantiating it
+# per-call is wasteful and triggers a fresh TLS handshake each time.
+_GN_DECODER = None
+
+
+def _get_gn_decoder():
+    """Return a process-wide GoogleNewsClient (lazy-initialized).
+
+    The client is built with ``language=de`` and ``country=DE`` so the
+    batchexecute endpoint returns German-language payloads. We instantiate
+    a new one if either of those settings differ, but otherwise reuse.
+    """
+    global _GN_DECODER
+    if _GN_DECODER is None:
+        try:
+            from google_news_api import GoogleNewsClient
+        except ImportError as e:
+            logger.warning("[google-news-api] not installed: %s", e)
+            return None
+        try:
+            _GN_DECODER = GoogleNewsClient(language="de", country="DE")
+        except Exception as e:
+            logger.warning("[google-news-api] init failed: %s", e)
+            return None
+    return _GN_DECODER
+
+
+def _fetch_google_news_text(item, delay_sec: float = 1.0) -> Optional[str]:
+    """Decode a Google News RSS redirect URL to its publisher URL, then
+    fetch the publisher article body. Falls back to RSS title + summary
+    if decode or fetch fails.
+
+    Returns the full article body as a string, or None if every path failed.
+    """
+    raw_url = item.get("url")
+    title = item.get("title") or ""
+    summary = item.get("summary") or ""
+    fallback = " ".join([title, summary]).strip()
+
+    if not raw_url:
+        return fallback or None
+
+    client = _get_gn_decoder()
+    if client is None:
+        return fallback or None
+
+    try:
+        decoded_url = client.decode_url(raw_url, timeout=20.0)
+    except Exception as e:
+        logger.info("[gn-decode] failed %s: %s", raw_url[:80], type(e).__name__)
+        return fallback or None
+
+    if not decoded_url or decoded_url == raw_url:
+        return fallback or None
+
+    # Cache the decoded URL on the item so dedup re-runs hit the same key.
+    item["url"] = decoded_url
+    item["_decoded_url"] = decoded_url
+    item["_original_gn_url"] = raw_url
+
+    if delay_sec > 0:
+        time.sleep(delay_sec)
+
+    try:
+        from pipeline.lib.rss_fetch import fetch_full_text as _fetch_full_text
+        result = _fetch_full_text(decoded_url)
+    except Exception as e:
+        logger.info("[gn-fetch] failed %s: %s", decoded_url[:80], type(e).__name__)
+        return fallback or None
+
+    text = result.get("full_text") or ""
+    if len(text) < 100:
+        # Some pages are paywalled or have JS-only rendering — fall back.
+        return fallback or None
+    return text
+
+
 def step_fetch_full_text(items, delay_sec=1.0):
     """Step 2.5: enrich surviving items with fetched article body.
 
@@ -255,34 +333,33 @@ def step_fetch_full_text(items, delay_sec=1.0):
     raw 150+ RSS entries.
 
     Items whose source declares ``"no_full_text": true`` (e.g. Google News,
-    whose URLs are redirects that hit a consent page) skip the HTTP fetch
-    and rely on RSS title + summary alone. If those two fields are both
-    empty, the item is dropped — translation cannot work without content.
+    whose RSS <link> is a redirect URL) are special-cased: we run them
+    through ``google-news-api`` ``decode_url`` to extract the real publisher
+    URL (Spiegel, WELT, etc.), then fetch that. If decode fails we fall
+    back to RSS title + summary as content. Items with combined title +
+    summary under 30 chars are dropped — translation cannot work without
+    content.
     """
     keep = []
     skipped = 0
     for it in items:
         if it.get("no_full_text"):
-            # Use RSS title + summary as the entire content. Drop empty.
-            html_or_text = " ".join([
-                (it.get("title") or ""),
-                (it.get("summary") or ""),
-            ]).strip()
-            if len(html_or_text) < 30:
+            full_text = _fetch_google_news_text(it, delay_sec=delay_sec)
+            if not full_text or len(full_text) < 30:
                 skipped += 1
                 logger.info(
                     "[skip no-full-text empty] %s | %s",
                     it.get("source_name"), it.get("title", "")[:60],
                 )
                 continue
-            it["full_text"] = html_or_text
-            it["content_html"] = html_or_text
+            it["full_text"] = full_text
+            it["content_html"] = full_text
             it["_fetch_done"] = True  # mark so fetch_full_text_for_items skips
             keep.append(it)
         else:
             keep.append(it)
     if skipped:
-        logger.info("[no_full_text] skipped %d item(s) with empty title+summary", skipped)
+        logger.info("[no_full_text] skipped %d item(s) with empty content", skipped)
     return rss_fetch.fetch_full_text_for_items(keep, delay_sec=delay_sec)
 
 
