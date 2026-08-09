@@ -16,7 +16,15 @@
     "ex_makler": {
       "last_processed_epoch": 1786240980,
       "processed_ids": [
-        "AcNbIi4_gbY"
+        "AcNbIi4_gbY",
+        "pKAUkc5BsmA",
+        "G7Z0vOgQRUA"
+      ]
+    },
+    "marktcheck": {
+      "last_processed_epoch": 1785942034,
+      "processed_ids": [
+        "G_ja6xKYf_k"
       ]
     }
   }

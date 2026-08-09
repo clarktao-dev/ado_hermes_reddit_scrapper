@@ -130,7 +130,13 @@ def main() -> int:
     state = youtube_state.StateStore(STATE_PATH)
 
     digests = []
-    for ch in channels:
+    for i, ch in enumerate(channels):
+        # Cooldown between channels so kome.ai (third-party transcript API) doesn't
+        # throttle us. Per user 2026-08-09: enforce ≥45s between two videos.
+        if i > 0:
+            cooldown = 45
+            print(f"\n  [cooldown] sleeping {cooldown}s before next channel...")
+            time.sleep(cooldown)
         print(f"\n=== {ch['name']} ({ch['id']}) ===")
         v = pick_video_for_channel(ch, state)
         if v is None:

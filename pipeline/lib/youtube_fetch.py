@@ -169,7 +169,22 @@ def list_channel_videos(channel_id: str, channel_name: str, channel_url: str,
             ))
         except (KeyError, ValueError):
             continue
-    # Newest first; videos without epoch go to the end
+    # Filter out videos that lack RSS-supplied epoch — these are typically YouTube Shorts
+    # which YouTube RSS feed doesn't include. Without RSS epoch we can't trust the
+    # yt-dlp 'epoch' (which is playlist-add time, can be wildly wrong). Excluding them
+    # also prevents picking new uploads that haven't been around long enough to be
+    # trusted.
+    rss_videos = [m for m in metas if m.epoch and m.epoch > 0]
+    if rss_videos:
+        # Use only RSS-confirmed videos (real long-form uploads)
+        metas = rss_videos
+    # Drop videos whose epoch is not RSS-confirmed (YouTube Shorts, scheduled premieres,
+    # YT Music tracks, etc.). yt-dlp's flat-playlist epoch is the playlist-add time and
+    # can be wildly wrong (off by a year in some cases). We only want videos with a real
+    # uploaded_at from the RSS feed.
+    confirmed = [m for m in metas if m.id in rss_published and rss_published[m.id]]
+    metas = confirmed
+    # Newest first
     metas.sort(key=lambda v: v.epoch or 0, reverse=True)
     return metas
 
