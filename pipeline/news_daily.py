@@ -690,7 +690,7 @@ def step_update_side_effects(
 
 def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
                  max_days=7, quota_primary=8, quota_other=3,
-                 min_relevance=5, min_quick_score=6,
+                 min_relevance=3, min_quick_score=4,
                  skip_store=False, pipeline_run_id="",
                  mode: str = "short"):
     t_start = time.time()
@@ -862,10 +862,10 @@ def main():
                         "0 disables source quota.")
     p.add_argument("--quota-other", type=int, default=3,
                    help="Max items per run from each other source.")
-    p.add_argument("--min-relevance", type=int, default=5,
+    p.add_argument("--min-relevance", type=int, default=3,
                    help="Drop items whose LLM-assigned relevance_to_buyer is "
                         "below this score (0-10). 0 disables the filter.")
-    p.add_argument("--min-quick-score", type=int, default=6,
+    p.add_argument("--min-quick-score", type=int, default=4,
                    help="Title-only pre-filter (cheaper than --min-relevance). "
                         "Drops items whose quick_score is below this. 0 disables.")
     p.add_argument("--skip-store", action="store_true",

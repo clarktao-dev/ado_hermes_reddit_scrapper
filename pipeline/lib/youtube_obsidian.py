@@ -145,17 +145,18 @@ def _render_index(digests, date_str: str) -> str:
 
 
 def _render_short_md(d) -> str:
-    """Compact 200-char + bullets + view (Task 7 short-summary mode).
+    """Compact summary + bullets + view + vocab (Task 9 short-summary).
 
     The daily pipeline runs in ``--mode short`` by default to save LLM
-    tokens (~25-30% of the long-form Map-Reduce). The structure prompt
-    is intentionally minimal — one summary sentence, 3-5 bullets, and
-    1-2 sentences of analyst view.
+    tokens. The structure prompt now also asks for 3-5 個 vocab (Task 9),
+    so we render the vocabulary section too. The section is OPTIONAL —
+    if the LLM left it empty (e.g. non-real-estate video), the vault
+    shows ``(無)``.
 
     The LLM call lives in :func:`pipeline.youtube_daily.step_structure_short`
     and writes back into ``d.summary_zh`` (200-char summary), ``d.analyst_zh``
-    (3-5 bullets), ``d.producer_zh`` (1-2 sentences). ``d.vocab_zh`` is left
-    empty — vocab is a long-form affordance only.
+    (3-5 bullets), ``d.producer_zh`` (1-2 sentences), and ``d.vocab_zh``
+    (3-5 德文術語 with 中文 translation).
     """
     duration_min = d.duration_sec // 60
     duration_sec = d.duration_sec % 60
@@ -186,6 +187,10 @@ def _render_short_md(d) -> str:
         "## 觀點",
         "",
         d.producer_zh or "（無）",
+        "",
+        "## 重點詞彙",
+        "",
+        d.vocab_zh or "（無）",
         "",
         "---",
         "",

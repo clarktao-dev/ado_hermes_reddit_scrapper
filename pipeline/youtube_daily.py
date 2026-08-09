@@ -137,7 +137,7 @@ def _state_json_has(state: youtube_state.StateStore, channel_id: str,
 # Short-summary mode (Task 7, 2026-08-09)
 # --------------------------------------------------------------------------- #
 
-SHORT_STRUCTURE_SYSTEM_PROMPT = """你是專精於德國房地產的資深編輯助理,幫台灣投資人做「一句話 + bullets + 觀點」的快速摘要。
+SHORT_STRUCTURE_SYSTEM_PROMPT = """你是專精於德國房地產的資深編輯助理,幫台灣投資人做「一句話 + bullets + 觀點 + 重點詞彙」的快速摘要。
 
 **輸入**:YouTube 影片的繁體中文逐字稿(已是德文→繁中的機器翻譯)。
 
@@ -150,14 +150,17 @@ SHORT_STRUCTURE_SYSTEM_PROMPT = """你是專精於德國房地產的資深編輯
 (3-5 個 bullet,每個 bullet 用 `- ` 開頭,點出影片的關鍵事實、數據、論點)
 
 ## 觀點
-(1-2 句,給台灣房地產投資人的實質觀察 — 為何這部影片值得看、後續要追�什麼)
+(1-2 句,給台灣房地產投資人的實質觀察 — 為何這部影片值得看、後續要追蹤什麼)
+
+## 重點詞彙
+(3-5 個德文術語,每個用「- **德文(中文)**：用法說明 1-2 句,含使用情境或計算範例」的格式。**若影片確實沒有專業術語,這個 section 留空、輸出 `## 重點詞彙` 後直接空一行** — LLM 失敗也允許,parser 會顯示「(無)」)
 
 **規則**:
 - 只能根據輸入內容整理,禁止補充原文沒有的資料
 - 專有名詞保留德文原文並用括號補充中文(例:Grunderwerbsteuer(房地產交易稅))
 - 數字、人名、公司名稱忠於原文
 - 使用台灣在地表達
-- **嚴格控制長度**:一句話 ≤200 字、bullets 3-5 個、觀點 1-2 句。**不要展開分析、不要寫長段落** — 這是 daily 預設的輕量版,完整分析請走 ``--mode long``。
+- **嚴格控制長度**:一句話 ≤200 字、bullets 3-5 個、觀點 1-2 句、詞彙 3-5 個。**不要展開分析、不要寫長段落** — 這是 daily 預設的輕量版,完整分析請走 ``--mode long``。
 """
 
 SHORT_STRUCTURE_USER_TEMPLATE = """以下是 YouTube 影片逐字稿的繁體中文機器翻譯結果。請做輕量版摘要。
@@ -208,7 +211,7 @@ def step_structure_short(video, translated_text: str,
         text, _usage = call(messages, timeout=llm_timeout)
     except Exception as e:  # noqa: BLE001
         logger.warning("step_structure_short: LLM call failed: %s", e)
-        return {"summary_zh": "", "analyst_zh": "", "producer_zh": ""}
+        return {"summary_zh": "", "analyst_zh": "", "producer_zh": "", "vocab_zh": ""}
     text = text.strip()
     # OpenCC belt-and-braces
     from pipeline.lib.translate import (  # noqa: PLC0415
@@ -222,8 +225,12 @@ def step_structure_short(video, translated_text: str,
 
 
 def _split_short_digest(text: str) -> dict:
-    """Parse the short-mode structured Markdown into the three sections."""
-    sections = {"summary_zh": "", "analyst_zh": "", "producer_zh": ""}
+    """Parse the short-mode structured Markdown into the four sections.
+
+    ``vocab_zh`` is OPTIONAL — empty string when the LLM left the
+    vocabulary section blank or the parser couldn't find it (Task 9).
+    """
+    sections = {"summary_zh": "", "analyst_zh": "", "producer_zh": "", "vocab_zh": ""}
     if not text or text.startswith("[LLM_ERROR]"):
         sections["summary_zh"] = text or ""
         return sections
@@ -240,10 +247,12 @@ def _split_short_digest(text: str) -> dict:
     for h, b in headers_bodies:
         if "一句話" in h or "一句" in h:
             sections["summary_zh"] = b
-        elif "bullets" in h.lower() or "重點" in h:
+        elif "bullets" in h.lower() or "重點" in h and "詞彙" not in h:
             sections["analyst_zh"] = b
         elif "觀點" in h:
             sections["producer_zh"] = b
+        elif "詞彙" in h or "vocab" in h.lower():
+            sections["vocab_zh"] = b
     return sections
 
 
@@ -412,8 +421,10 @@ def _translate_only(transcript_text: str, source: str = "de",
 
 
 def _build_short_digest(video, translated_text: str, t0: float) -> youtube_translate.VideoDigest:
-    """Build a VideoDigest with summary_zh/analyst_zh/producer_zh populated
-    from :func:`step_structure_short`. ``vocab_zh`` stays empty (long-form only).
+    """Build a VideoDigest with summary_zh/analyst_zh/producer_zh/vocab_zh
+    populated from :func:`step_structure_short}. ``vocab_zh`` is
+    OPTIONAL — the LLM may leave it empty (e.g. videos without real-estate
+    jargon), in which case the vault renders ``(無)``.
     """
     sections = step_structure_short(video, translated_text)
     return youtube_translate.VideoDigest(
@@ -428,7 +439,7 @@ def _build_short_digest(video, translated_text: str, t0: float) -> youtube_trans
         summary_zh=sections["summary_zh"],
         analyst_zh=sections["analyst_zh"],
         producer_zh=sections["producer_zh"],
-        vocab_zh="",
+        vocab_zh=sections.get("vocab_zh", ""),
         map_calls=0,
         reduce_calls=1,
         elapsed_sec=time.time() - t0,
