@@ -50,6 +50,15 @@ def step_write_vault(digests, repo_root: str, date_str: str | None = None,
         suffix = "_summary.md" if content_kind == "short-summary" else "_longform.md"
         for p in out_dir.glob(f"*{suffix}"):
             p.unlink()
+        # Task 14 (2026-08-10): also wipe _index.md so it always reflects the
+        # current run's digests. Previously the `if not index_path.exists()`
+        # guard below meant a stale _index.md from an earlier run (e.g. a
+        # different channel mix, or a previous day's leftover) would survive
+        # the wipe and silently keep pointing at old content even after
+        # `*_summary.md` / `*_longform.md` had been replaced.
+        index_path = out_dir / "_index.md"
+        if index_path.exists():
+            index_path.unlink()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     summary = {"date": date_str, "written": [], "skipped": [], "errors": []}
@@ -71,10 +80,12 @@ def step_write_vault(digests, repo_root: str, date_str: str | None = None,
             summary["errors"].append({"digest": d.video_id, "error": str(e)})
 
     # Index file (shared across short + long summaries in the same folder).
+    # Task 14: always rewrite so the index stays consistent with whatever
+    # `*_summary.md` / `*_longform.md` files actually exist. The wipe step
+    # above already removed any stale _index.md.
     index_path = out_dir / "_index.md"
-    if not index_path.exists():
-        index_path.write_text(_render_index(digests, date_str), encoding="utf-8")
-        summary["written"].append(str(index_path.relative_to(repo)))
+    index_path.write_text(_render_index(digests, date_str), encoding="utf-8")
+    summary["written"].append(str(index_path.relative_to(repo)))
 
     summary["n_files"] = len(summary["written"])
     summary["n_errors"] = len(summary["errors"])
