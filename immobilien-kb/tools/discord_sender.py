@@ -62,6 +62,7 @@ def _resolve_channel(channel: str) -> str:
         "每日頭條": "1520791894995501106",
         "podcast": "1535461574460968960",    # #每日podcast (YouTube transcript digest)
         "每日podcast": "1535461574460968960",
+        "tao": "1495562787685011616",        # #tao (Destatis official stats digest)
     }
     if channel in aliases:
         return aliases[channel]
