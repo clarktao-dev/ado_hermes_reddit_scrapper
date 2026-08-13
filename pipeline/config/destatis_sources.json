@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "description": "Destatis 主站公開 highchart CSV 來源清單(3 個全部啟用,取代原 GENESIS 計畫)",
+  "base_url_note": "Destatis 主站公開 csvurl(從圖表頁面提取),UTF-8 編碼,無 metadata rows,row 0 直接是 header",
+  "sources": [
+    {
+      "id": "auftragseingang_bauhauptgewerbe",
+      "name_de": "Auftragseingang im Bauhauptgewerbe",
+      "name_zh": "主承攬業新訂單(實質,原值)",
+      "url": "https://www.destatis.de/DE/Themen/Branchen-Unternehmen/Bauen/_Grafik/_Interaktiv/_Daten/auftragseingang-bauhauptgewerbe.csv?__blob=value&v=70",
+      "enabled": true,
+      "renderer": "generic_table",
+      "category": "construction_orders",
+      "vault_filename": "auftragseingang_bauhauptgewerbe.md",
+      "_source_page": "https://www.destatis.de/DE/Themen/Branchen-Unternehmen/Bauen/_Grafik/_Interaktiv/auftragseingang-bauhauptgewerbe.html"
+    },
+    {
+      "id": "genehmigte_wohnungen_monat",
+      "name_de": "Genehmigte Wohnungen (monatlich)",
+      "name_zh": "許可住宅數(月報)",
+      "url": "https://www.destatis.de/DE/Themen/Branchen-Unternehmen/Bauen/_Grafik/_Interaktiv/_Daten/genehmigte-wohnungen-monat.csv?__blob=value&v=82",
+      "enabled": true,
+      "renderer": "generic_table",
+      "category": "construction_permits",
+      "vault_filename": "genehmigte_wohnungen_monat.md",
+      "_source_page": "https://www.destatis.de/DE/Themen/Branchen-Unternehmen/Bauen/_Grafik/_Interaktiv/genehmigte-wohnungen-monat.html"
+    },
+    {
+      "id": "investments_construction",
+      "name_de": "Investitionen im Baugewerbe",
+      "name_zh": "營建業投資",
+      "url": "https://www.destatis.de/DE/Themen/Branchen-Unternehmen/Bauen/_Grafik/_Interaktiv/_Daten/investitionen-baugewerbe.csv?__blob=value&v=2",
+      "enabled": true,
+      "renderer": "generic_table",
+      "category": "construction_investment",
+      "vault_filename": "investments_construction.md",
+      "_source_page": "https://www.destatis.de/DE/Themen/Branchen-Unternehmen/Bauen/_Grafik/_Interaktiv/investitionen-baugewerbe.html"
+    }
+  ]
+}

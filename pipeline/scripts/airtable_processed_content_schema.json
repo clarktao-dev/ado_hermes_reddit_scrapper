@@ -110,9 +110,10 @@
         "short-summary",
         "long-form",
         "pending-long-form",
-        "skipped-long-form"
+        "skipped-long-form",
+        "stat-table"
       ],
-      "description": "Article format this record has been produced in. Task 7 (2026-08-09): defaults to short-summary for daily pipeline; long-form is on-demand via recommend_long_form.py confirm."
+      "description": "Article format this record has been produced in. Task 7 (2026-08-09): defaults to short-summary for daily pipeline; long-form is on-demand via recommend_long_form.py confirm. Task 17 (2026-08-13): 'stat-table' added for destatis CSV output."
     },
     {
       "name": "discord_message_id",
