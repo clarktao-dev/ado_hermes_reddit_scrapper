@@ -61,7 +61,9 @@ from pipeline.lib.processed_store import (  # noqa: E402
 )
 
 ENV_FILE = Path("/root/.hermes/.env")
-KNOWN_SOURCE_TYPES = ("youtube", "news", "reddit", "podcast")
+KNOWN_SOURCE_TYPES = (
+    "youtube", "news", "reddit", "podcast", "destatis_csv",
+)
 TITLE_PREVIEW = 50  # how many chars of title to show in `recent` / `find`
 
 

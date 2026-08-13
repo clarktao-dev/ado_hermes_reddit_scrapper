@@ -82,10 +82,19 @@ def cmd_candidates(args: argparse.Namespace) -> int:
         candidates.append({"id": r["id"], **f})
 
     # Sort by duration_sec ASC (shorter podcasts make tighter long-form articles)
+    def _parse_meta(c):
+        m = c.get("metadata")
+        if isinstance(m, str):
+            try:
+                return json.loads(m)
+            except Exception:
+                return {}
+        return m or {}
+
     candidates.sort(
         key=lambda c: int(
-            ((c.get("metadata") or {}).get("duration_sec"))
-            or ((c.get("metadata") or {}).get("duration"))
+            _parse_meta(c).get("duration_sec")
+            or _parse_meta(c).get("duration")
             or 999999
         )
     )
