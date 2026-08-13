@@ -10,14 +10,6 @@
       "enabled": true
     },
     {
-      "id": "marktcheck",
-      "name": "Marktcheck",
-      "url": "https://www.youtube.com/@marktcheck",
-      "channel_id": "UCxec_VgCE-5DUZ8MocKbEdg",
-      "category": "real_estate",
-      "enabled": true
-    },
-    {
       "id": "finanzfluss",
       "name": "Finanzfluss",
       "url": "https://www.youtube.com/@Finanzfluss",
@@ -62,6 +54,30 @@
       "name": "Immocation",
       "url": "https://www.youtube.com/@immocation",
       "channel_id": "UCVUYh7UEdKW8v3cPIDA4Iow",
+      "category": "real_estate",
+      "enabled": true
+    },
+    {
+      "id": "insightsimmo",
+      "name": "Insights Immo",
+      "url": "https://www.youtube.com/@insightsimmo",
+      "channel_id": "UCp5ve3eO5kReFzZYxEPNzPw",
+      "category": "real_estate",
+      "enabled": true
+    },
+    {
+      "id": "sogehtbrandschutz",
+      "name": "So geht Brandschutz",
+      "url": "https://www.youtube.com/@sogehtbrandschutz",
+      "channel_id": "UCxbStTzwp1DQCefSOLdBZ9w",
+      "category": "real_estate",
+      "enabled": true
+    },
+    {
+      "id": "alexanderschmid_podcast",
+      "name": "Alexander Schmid Podcast",
+      "url": "https://www.youtube.com/@alexanderschmid_podcast",
+      "channel_id": "UCxt0EsAUIHo30aHOJgQOfJQ",
       "category": "real_estate",
       "enabled": true
     }
