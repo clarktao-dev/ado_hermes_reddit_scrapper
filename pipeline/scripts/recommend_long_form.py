@@ -55,6 +55,7 @@ from pipeline.lib.processed_store import (  # noqa: E402
     ProcessedStore,
     make_hash,
 )
+from pipeline.lib import longform_vault  # noqa: E402  — vault cache + path helpers
 
 ARTICLE_TYPE_FIELD = "article_type"
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/.hermes/cron/output/recommend_long_form")
@@ -290,7 +291,12 @@ def _find_record_by_source_id(store: ProcessedStore, source_id: str) -> Optional
 
 
 def cmd_confirm(args: argparse.Namespace) -> int:
-    """Mark a record pending-long-form and shell out to youtube_daily.py --mode long."""
+    """Mark a record pending-long-form and shell out to youtube_daily.py --mode long.
+
+    Vault cache layer: if ``immobilien-kb/vault/Longform/<date>/<video_id>---<slug>.md``
+    already exists, skip the LLM pipeline entirely and just push the cached file
+    to Discord. This is the "Idea 1" cache — zero tokens for re-confirm.
+    """
     store = _get_store()
     rec = _find_record_by_source_id(store, args.source_id)
     if not rec:
@@ -298,8 +304,29 @@ def cmd_confirm(args: argparse.Namespace) -> int:
         return 1
     rec_id = rec["id"]
     source_hash = make_hash("youtube", args.source_id)
-    _patch_record(store, rec_id, source_hash, {ARTICLE_TYPE_FIELD: "pending-long-form"})
-    print(f"✅ {args.source_id} 標記為 pending-long-form")
+
+    # Cache check: if longform already written, skip the entire pipeline.
+    if not args.force and longform_vault.longform_already_exists(args.source_id):
+        cached = longform_vault.find_longform(args.source_id)
+        if cached is None:
+            # Defensive: race between exists check and find. Fall through to full path.
+            pass
+        else:
+            rel_path = str(cached.relative_to(ROOT))
+            print(f"♻️  vault cache hit: {rel_path}")
+            print("✅ 0 LLM tokens — skip youtube_daily, just push to Discord")
+            if not args.dry_run:
+                _patch_record(store, rec_id, source_hash, {ARTICLE_TYPE_FIELD: "long-form"})
+                _push_cached_to_discord(cached, args.source_id)
+            else:
+                print("🔇 --dry-run: skip Airtable + Discord")
+            return 0
+
+    if args.dry_run:
+        print(f"🔇 --dry-run: skip Airtable write (would mark {args.source_id} pending-long-form)")
+    else:
+        _patch_record(store, rec_id, source_hash, {ARTICLE_TYPE_FIELD: "pending-long-form"})
+        print(f"✅ {args.source_id} 標記為 pending-long-form")
 
     cmd = [
         "/root/.hermes/hermes-agent/venv/bin/python",
@@ -309,9 +336,95 @@ def cmd_confirm(args: argparse.Namespace) -> int:
     ]
     if args.dry_run:
         cmd.append("--dry-run")
+    if args.from_summary:
+        cmd.append("--from-summary")
     print(f"🚀 跑: {' '.join(cmd)}")
     rc = subprocess.call(cmd, cwd=str(ROOT))
+
+    # After youtube_daily finishes, migrate the longform file from
+    # podcast-kb/vault/Daily/.../  →  immobilien-kb/vault/Longform/<date>/...
+    # so the next confirm hits the cache instead of re-running.
+    if rc == 0 and not args.dry_run:
+        _migrate_longform_artifacts(args.source_id, rec)
+
     return rc
+
+
+def _migrate_longform_artifacts(source_id: str, rec: dict) -> None:
+    """Move freshly-written _longform.md from podcast-kb → immobilien-kb.
+
+    Best-effort: a missing source file is not fatal (the user may have
+    manually deleted it). On success, prints the new path and updates
+    Airtable ``vault_path`` so the next cron can find it.
+    """
+    pub_date = (
+        rec.get("fields", {}).get("first_seen_at", "")[:10]
+        or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    )
+    channel_name = (
+        (rec.get("fields", {}).get("metadata") or "")
+        .split('"channel_name"')[1].split('"')[1]
+        if '"channel_name"' in (rec.get("fields", {}).get("metadata") or "")
+        else "unknown"
+    )
+    moved_paths = []
+    # youtube_obsidian truncates the slug to 60 chars BEFORE appending
+    # _longform.md, so the video_id may be cut off in the middle of the
+    # slug. Use a permissive `*<video_id>*` glob and filter to end with
+    # the correct suffix to avoid matching summary files.
+    for date_dir in longform_vault.PODCAST_LONGFORM_ROOT.iterdir():
+        if not date_dir.is_dir():
+            continue
+        for src in date_dir.glob(f"*_longform.md"):
+            if source_id not in src.name:
+                continue
+            try:
+                dest = longform_vault.migrate_podcast_longform(
+                    video_id=source_id,
+                    source_md=src,
+                    date_str=pub_date,
+                    slug_hint=channel_name,
+                )
+                moved_paths.append(dest)
+            except Exception as e:  # noqa: BLE001
+                print(f"⚠️  migrate 失敗: {src} → {e}")
+
+    if moved_paths:
+        rel = str(moved_paths[0].relative_to(ROOT))
+        print(f"📦 已搬到: {rel}")
+        try:
+            store = _get_store()
+            _patch_record(
+                store,
+                rec["id"],
+                make_hash("youtube", source_id),
+                {ARTICLE_TYPE_FIELD: "long-form", "vault_path": rel},
+            )
+            print(f"✅ Airtable 標 long-form + vault_path={rel}")
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️  Airtable 更新失敗: {e}")
+
+
+def _push_cached_to_discord(cached_md: Path, source_id: str) -> None:
+    """Best-effort Discord push for the cache-hit branch.
+
+    Reuses the same wrapper as ``cmd_run`` to get the same embed shape.
+    Failures here don't downgrade the cache-hit success — the .md is the
+    source of truth, Discord is the convenience surface.
+    """
+    try:
+        from pipeline.lib.youtube_discord import _send  # type: ignore
+        rel = str(cached_md.relative_to(ROOT))
+        body = (
+            f"♻️ **長文 cache hit — {source_id}**\n\n"
+            f"📄 `{rel}`\n"
+            f"從 vault 直接推送,0 LLM token。\n\n"
+            + cached_md.read_text(encoding="utf-8")[:1500]
+        )
+        _send(channel="longform", content=body)
+        print("📨 已推 Discord #長文推薦")
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️  Discord 推送失敗(不影響 cache 結果): {e}")
 
 
 def cmd_skip(args: argparse.Namespace) -> int:
@@ -357,6 +470,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_conf = sub.add_parser("confirm", help="Trigger long-form generation for a video")
     p_conf.add_argument("source_id")
     p_conf.add_argument("--dry-run", action="store_true")
+    p_conf.add_argument("--force", action="store_true",
+                        help="Bypass vault cache — re-run the LLM pipeline even "
+                             "if immobilien-kb/vault/Longform/<date>/<video_id>---<slug>.md "
+                             "already exists (default: cache hit → 0 tokens).")
+    p_conf.add_argument("--from-summary", action="store_true",
+                        help="Pass --from-summary to youtube_daily so long-form is "
+                             "expanded from the existing short-summary vault file "
+                             "(Idea 2: skips translation, ~33%% fewer LLM tokens).")
     p_conf.set_defaults(func=cmd_confirm)
 
     p_skip = sub.add_parser("skip", help="Mark a video as skipped-long-form")
