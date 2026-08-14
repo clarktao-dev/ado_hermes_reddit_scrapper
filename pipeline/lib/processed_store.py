@@ -80,6 +80,26 @@ def make_hash(source_type: str, source_id: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def parse_metadata(raw: Any) -> dict:
+    """Defensive parser for Airtable's metadata field.
+
+    The metadata field is stored as a JSON string in Airtable (see
+    ``fields["metadata"] = json.dumps(...)`` in ``mark_processed``), but
+    historical rows may already be a dict if written by an older pipeline.
+    Returns an empty dict on any parse failure so callers can use
+    ``meta.get(...)`` unconditionally.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
 # Tracking query params to strip. utm_* catches utm_source, utm_medium,
 # utm_campaign, utm_term, utm_content, utm_id, gclid (with leading gbraid
 # and wbraid variants in the same family).

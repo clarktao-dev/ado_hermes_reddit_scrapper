@@ -1,0 +1,16 @@
+{
+  "version": "2026-08-14",
+  "min_score": 6,
+  "max_recommendations": 3,
+  "days_back": 3,
+  "max_input_per_run": 30,
+  "prefilter_keywords_drop": [
+    "pizza", "ofen", "ferrari", "tefal", "unold", "rezept", "küche",
+    "frühstartrente", "altersvorsorge", "depot", "etf",
+    "dax", "aktien", "scalable capital", "trade republic",
+    "condo", "apartment", "tax law", "cash flow",
+    "fachtagung", "messe", "kongress", "tagung",
+    "perfume", "düfte", "luxury", "schmuck"
+  ],
+  "excluded_article_types": ["long-form", "pending-long-form", "skipped-long-form"]
+}

@@ -63,6 +63,7 @@ def _resolve_channel(channel: str) -> str:
         "podcast": "1535461574460968960",    # #每日podcast (YouTube transcript digest)
         "每日podcast": "1535461574460968960",
         "tao": "1495562787685011616",        # #tao (Destatis official stats digest)
+        "longform": "1537705289367953408",  # #長文推薦 (long-form YouTube recs) — created 2026-08-14, manual via Discord UI
     }
     if channel in aliases:
         return aliases[channel]
