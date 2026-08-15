@@ -44,6 +44,7 @@ SUBREDDITS = [
     "Immobilieninvestments",
     "Finanzen",
     "Immoscoutwildgeworden",
+    "wohnen",
 ]
 
 PER_SUB_LIMIT = 10
@@ -211,7 +212,7 @@ def write_vault(per_sub_picks: dict[str, list[dict]], dry_run: bool) -> Path:
     index_lines = [
         f"# Reddit Daily — {today}",
         "",
-        "3 個德國房地產 / 財經 subreddit,各取 top 3 LLM 評分最高的貼文,",
+        f"{len(SUBREDDITS)} 個德國房地產 / 財經 subreddit,各取 top 3 LLM 評分最高的貼文,",
         "翻譯 + 摘要後推到 Discord #reddit-insights。",
         "",
     ]
