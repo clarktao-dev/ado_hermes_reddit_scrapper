@@ -64,6 +64,7 @@ def _resolve_channel(channel: str) -> str:
         "每日podcast": "1535461574460968960",
         "tao": "1495562787685011616",        # #tao (Destatis official stats digest)
         "longform": "1537705289367953408",  # #長文推薦 (long-form YouTube recs) — created 2026-08-14, manual via Discord UI
+        "reddit": "1537907956132089976",   # #Reddit (Reddit 房地產/財經每日精選) — created 2026-08-14
     }
     if channel in aliases:
         return aliases[channel]
