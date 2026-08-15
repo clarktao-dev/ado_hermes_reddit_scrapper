@@ -17,6 +17,11 @@ def load_config():
     for fname in os.listdir(_CONFIG_DIR):
         if not fname.endswith(".json"):
             continue
+        # destatis_sources.json is read directly by destatis_daily.py and its
+        # "sources" key would clobber sources.json via cfg.update below.
+        # Skip it here so news_daily.py sees only the RSS news sources.
+        if fname.startswith("destatis_"):
+            continue
         with open(os.path.join(_CONFIG_DIR, fname), encoding="utf-8") as f:
             data = json.load(f)
         cfg.update(data)
