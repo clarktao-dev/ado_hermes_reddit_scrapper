@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
 import re
 import sys
 import time
@@ -33,8 +35,26 @@ VAULT_ROOT = REPO / "immobilien-kb" / "vault" / "Reddit"
 sys.path.insert(0, str(REPO))
 
 from pipeline.lib.long_form_editor import score_candidates, load_criteria  # noqa: E402
+from pipeline.lib.processed_store import (  # noqa: E402
+    ProcessedStore,
+    ProcessedStoreError,
+    DEFAULT_TABLE,
+)
 from pipeline.lib.translate import analyze_items_batch  # noqa: E402
 from pipeline.lib.youtube_discord import _send  # noqa: E402  # re-use existing Discord sender
+
+PROCESSED_BASE_ID = os.environ.get(
+    "AIRTABLE_PROCESSED_CONTENT_BASE_ID", "appHilorcrC5T0p2u"
+)
+
+logger = logging.getLogger("reddit_monitor")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s")
+    )
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 # ----------------------------------------------------------------------- #
 # Config
@@ -159,6 +179,8 @@ def build_records(entries: list[dict]) -> list[dict]:
             "_author": e["author"],
             "_content_html": e["content_html"],
             "_date": e["date"],
+            # _reddit_id 保留原 reddit atom id,給後面 write_vault → mark_processed 用
+            "_reddit_id": e["id"],
         }
         for e in entries
     ]
@@ -188,13 +210,23 @@ def build_translate_items(records: list[dict]) -> list[dict]:
 # ----------------------------------------------------------------------- #
 
 
-def write_vault(per_sub_picks: dict[str, list[dict]], dry_run: bool) -> Path:
-    """Write immobilien-kb/vault/Reddit/<date>/_index.md + per-post .md files."""
+def write_vault(per_sub_picks: dict[str, list[dict]], dry_run: bool) -> tuple[Path, dict[str, Path]]:
+    """寫 vault + 回傳每篇貼文對應的 vault 路徑。
+
+    回傳:
+        (index_path, post_paths): index_path 是 _index.md 路徑,
+        post_paths 是 ``(subreddit, source_id) -> Path`` 的 mapping,
+        給 ``mark_processed`` 用 ``output_path`` 欄位。
+
+    命名:``<subreddit>-<slug>.md``,subreddit 用 ``_`` 取代 ``/``,
+    slug 取 title 前 60 字,只留 ``[\\w\\-一-鿿]``(中文/英文/數字/底線/連字號)。
+    """
     today = datetime.now(timezone.utc).date().isoformat()
     out_dir = VAULT_ROOT / today
     if not dry_run:
         out_dir.mkdir(parents=True, exist_ok=True)
 
+    post_paths: dict[str, Path] = {}
     # Per-post files
     for sub, picks in per_sub_picks.items():
         for it in picks:
@@ -207,6 +239,10 @@ def write_vault(per_sub_picks: dict[str, list[dict]], dry_run: bool) -> Path:
             body = render_post_md(it)
             if not dry_run:
                 post_path.write_text(body, encoding="utf-8")
+            # 用 reddit post id 當 key(每篇貼文唯一)
+            reddit_id = it.get("_reddit_id") or it.get("source_id") or it.get("id") or ""
+            if reddit_id:
+                post_paths[reddit_id] = post_path
 
     # Index
     index_lines = [
@@ -231,7 +267,7 @@ def write_vault(per_sub_picks: dict[str, list[dict]], dry_run: bool) -> Path:
     index_path = out_dir / "_index.md"
     if not dry_run:
         index_path.write_text("\n".join(index_lines), encoding="utf-8")
-    return index_path
+    return index_path, post_paths
 
 
 def render_post_md(it: dict) -> str:
@@ -278,6 +314,100 @@ def push_discord(per_sub_picks: dict[str, list[dict]], dry_run: bool) -> None:
             continue
         _send(channel=DISCORD_CHANNEL_REDDIT, content=text[:1900])  # 1900 safe cap
         time.sleep(1)
+
+
+def _build_reddit_metadata(item: dict, today: str) -> dict:
+    """組出 ProcessedContent.metadata 用的 JSON blob。"""
+    return {
+        "source": "reddit",
+        "subreddit": item.get("source_name", ""),  # e.g. "r/Finanzen"
+        "url": item.get("_url") or item.get("url", ""),
+        "author": item.get("_author", ""),
+        "pub_date": item.get("_date") or item.get("pub_date", ""),
+        "score": item.get("score", 0),
+        "rationale": item.get("rationale", ""),
+        "digest_date": today,
+    }
+
+
+def mark_reddit_processed(
+    picks: dict[str, list[dict]],
+    post_paths: dict[str, Path],
+    *,
+    dry_run: bool,
+) -> None:
+    """對每篇上榜貼文呼叫 ``ProcessedStore.mark_processed``。
+
+    ``source_id`` 用 reddit atom id(像 ``t3_xxxxx``)— 這是 Reddit 唯一
+    識別,當成 ProcessedContent 的 dedup key(配合 source_type='reddit'
+    即可用 ``make_hash(source_type, source_id)`` 算 source_hash)。
+
+    Failure of any single mark is logged but does not raise — vault 寫入
+    已經成功,下次 run 會自動重試(``mark_processed`` 是 idempotent)。
+
+    ``--dry-run`` 不寫 Airtable,只 print 預期行為。
+    """
+    if dry_run:
+        n = sum(len(v) for v in picks.values())
+        logger.info(
+            "[dry-run] 預期標記 %d 個 reddit record 到 ProcessedContent",
+            n,
+        )
+        return
+
+    store = ProcessedStore(PROCESSED_BASE_ID, DEFAULT_TABLE)
+    today = datetime.now(timezone.utc).date().isoformat()
+    ok = 0
+    errs: list[tuple[str, str]] = []
+    for sub, items in picks.items():
+        for it in items:
+            reddit_id = it.get("_reddit_id") or it.get("source_id") or ""
+            if not reddit_id:
+                logger.warning("skip: 沒有 reddit_id (%s)", it.get("title", "")[:40])
+                continue
+            output_path = post_paths.get(reddit_id)
+            if output_path is not None:
+                output_path = str(output_path)
+            title = it.get("title_zh") or it.get("title", "")
+            channel_value = f"reddit.{sub.replace('/', '_')}"
+            first_seen = it.get("_date") or it.get("pub_date")
+            # first_seen 必須是 ISO8601 datetime,不是 date。pub_date 已經是 YYYY-MM-DD 字串。
+            first_seen_at = None
+            if first_seen:
+                try:
+                    first_seen_at = datetime.fromisoformat(first_seen)
+                except (TypeError, ValueError):
+                    first_seen_at = None
+            try:
+                record_id = store.mark_processed(
+                    source_type="reddit",
+                    source_id=reddit_id,
+                    title=title,
+                    channels=[channel_value],
+                    output_path=output_path,
+                    metadata=_build_reddit_metadata(it, today),
+                    tags=["short"],
+                    article_type="short-summary",
+                    first_seen_at=first_seen_at,
+                )
+                ok += 1
+                logger.info(
+                    "marked processed: reddit | %s -> %s", reddit_id, record_id,
+                )
+            except ProcessedStoreError as e:
+                logger.error(
+                    "mark_processed failed for reddit | %s: %s", reddit_id, e,
+                )
+                errs.append((reddit_id, str(e)))
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "mark_processed crashed for reddit | %s: %s", reddit_id, e,
+                )
+                errs.append((reddit_id, str(e)))
+    logger.info(
+        "[reddit ledger] ok=%d errors=%d total=%d",
+        ok, len(errs), sum(len(v) for v in picks.values()),
+    )
 
 
 # ----------------------------------------------------------------------- #
@@ -363,8 +493,12 @@ def main() -> None:
         final[sub_name] = merged
 
     # 5) Write vault
-    idx = write_vault(final, dry_run=args.dry_run)
+    idx, post_paths = write_vault(final, dry_run=args.dry_run)
     print(f"[reddit_monitor] vault → {idx}")
+
+    # 5b) Mark ProcessedContent — Plan 3 Round 3 補的,
+    # 之前完全沒寫,導致 daily_digest 拉不到 reddit record。
+    mark_reddit_processed(final, post_paths, dry_run=args.dry_run)
 
     # 6) Push Discord
     if not args.no_discord:
