@@ -1,0 +1,91 @@
+# Cron Jobs (Plan 3 — Daily Digest)
+# =================================
+# 這是 placeholder schema,目前 ``enabled: false``,需 PM 蓋章後手動開。
+#
+# 排程器說明
+# ----------
+# 1. ``digest_candidates_cest_0630``(每日 04:30 UTC = 06:30 CEST):
+#    從 Airtable ProcessedContent 拉昨日 24-48 小時的 record,排序 + quota
+#    篩選成候選清單,推 header + N 則候選到 Discord channel
+#    1539010288026779688,同步寫 DailyDigestPicks。
+#
+# 2. ``digest_recap_cest_tue_fri_0700``(週二/五 05:00 UTC = 07:00 CEST):
+#    推過去 5 天 DailyDigestPicks 中 ``picked=yes`` 的清單到 channel
+#    1537705289367953408(#長文推薦 / digest_recap 共用 channel)。
+#    ⚠️  --recap flag 目前 daily_digest.py 還沒實作(Plan 3 Part 2),
+#    開啟前要先補。Part 1 這輪先建 placeholder。
+#
+# 配套 daemon
+# -----------
+# ``discord_picks.py`` 是**長跑 daemon**(非 cron 一次性)—
+# 訂閱 MESSAGE_REACTION_ADD,把 emoji 反應寫進 DailyDigestPicks。
+# 啟動方式見 ``pipeline/lib/discord_picks.py`` docstring(systemd 或
+# nohup)。**沒有它在線,cron 推的 digest 不會被「接收」→ labeled data
+# 不會累積**。所以開 cron 之前要先把 daemon 拉起來。
+#
+# 時區說明
+# --------
+# - systemd / cron 本身只認 UTC(主機時鐘也是 UTC),所以排程用 UTC。
+# - CEST = UTC+2(夏令);CET = UTC+1(冬令)。
+# - 「看起來像 06:30 CEST」實際上是「04:30 UTC」(夏令)或「05:30 UTC」(冬令)。
+# - 本檔用夏令為基準排 04:30 UTC;冬令期間需手動暫停 + 改 schedule,
+#   或包一層 tz-aware wrapper(本期不做)。
+#
+# 開啟前檢查清單
+# --------------
+# 1. AIRTABLE_API_KEY 在 daemon / cron 環境都設好
+# 2. DISCORD_BOT_TOKEN(給 daemon)
+# 3. discord_picks.py daemon 已在 systemd / nohup 跑
+# 4. daily_digest.py --recap flag 實作(只影響第二條 job)
+# 5. 改 ``enabled: true``
+
+version: 1
+timezone: UTC
+
+jobs:
+  # -----------------------------------------------------------------
+  # Job 1: 每日 06:30 CEST 推候選清單
+  # -----------------------------------------------------------------
+  - name: digest_candidates_cest_0630
+    enabled: false  # PM 蓋章後手動開
+    schedule: '30 4 * * *'  # 04:30 UTC = 06:30 CEST(夏令)
+    script: pipeline/scripts/daily_digest.py
+    args: []
+    env:
+      - AIRTABLE_API_KEY
+    description: |
+      每日候選清單推送。從 Airtable ProcessedContent 拉過去 24-48 小時
+      的 record,排序(paywall_preview_kept DESC → processed_at DESC),
+      每個 source_type 最多 5 篇,推 header + N 則候選到 channel
+      1539010288026779688(digest_candidates)。
+    deliver:
+      discord_channel_id: '1539010288026779688'
+      discord_alias: digest_candidates
+    depends_on:
+      - discord_picks_daemon  # 必須在線,否則 emoji reaction 不會被接收
+    notes:
+      - "dry-run 確認格式: pipeline/scripts/daily_digest.py --dry-run"
+      - "idempotent Airtable setup: pipeline/scripts/setup_airtable_daily_digest.py"
+
+  # -----------------------------------------------------------------
+  # Job 2: 週二/五 07:00 CEST 推回顧
+  # -----------------------------------------------------------------
+  - name: digest_recap_cest_tue_fri_0700
+    enabled: false  # PM 蓋章後手動開,且 --recap flag 還沒寫
+    schedule: '0 5 * * 2,5'  # 05:00 UTC = 07:00 CEST(夏令),週二 + 週五
+    script: pipeline/scripts/daily_digest.py
+    args: ['--recap']
+    env:
+      - AIRTABLE_API_KEY
+    description: |
+      週二/五回顧推送。從 DailyDigestPicks 撈過去 5 天
+      picked=yes 的清單,推到 channel 1537705289367953408
+      (同 longform channel;Plan 3 已加 digest_recap alias)。
+    deliver:
+      discord_channel_id: '1537705289367953408'
+      discord_alias: digest_recap
+    depends_on:
+      - discord_picks_daemon
+    notes:
+      - "⚠️  --recap flag Plan 3 Part 2 才會實作,Part 1 先建 placeholder"
+      - "dry-run: pipeline/scripts/daily_digest.py --recap --dry-run(目前會 argparse 失敗)"

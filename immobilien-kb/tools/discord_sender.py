@@ -56,6 +56,12 @@ def _load_token() -> str:
 
 def _resolve_channel(channel: str) -> str:
     """接受 channel ID 或別名 ('home', 'headlines', '每日頭條')"""
+    # 別名表(channel id 寫死,別名只是給 call site 用)。
+    # 新增 digest_candidates / digest_recap(Plan 3,2026-08-17)對應:
+    #   - digest_candidates = 每日 06:30 CEST 推候選清單
+    #   - digest_recap      = 週二/五 07:00 CEST 推週回顧(同一 channel
+    #                         也服務 long-form YouTube recs,因此保留
+    #                         ``longform`` alias 給舊 caller 用)
     aliases = {
         "home": "1495548848183967916",      # main channel id
         "headlines": "1520791894995501106",  # #每日頭條
@@ -65,6 +71,8 @@ def _resolve_channel(channel: str) -> str:
         "tao": "1495562787685011616",        # #tao (Destatis official stats digest)
         "longform": "1537705289367953408",  # #長文推薦 (long-form YouTube recs) — created 2026-08-14, manual via Discord UI
         "reddit": "1537907956132089976",   # #Reddit (Reddit 房地產/財經每日精選) — created 2026-08-14
+        "digest_candidates": "1539010288026779688",  # 每日候選清單 (Plan 3)
+        "digest_recap": "1537705289367953408",        # 週回顧(同 longform channel;Plan 3)
     }
     if channel in aliases:
         return aliases[channel]
