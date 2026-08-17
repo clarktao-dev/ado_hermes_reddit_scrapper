@@ -363,6 +363,8 @@ class ProcessedStore:
         tags: Optional[List[str]] = None,
         first_seen_at: Optional[datetime] = None,
         article_type: Optional[str] = None,
+        paywall_preview_kept: Optional[bool] = None,
+        paywall_preview_kind: Optional[str] = None,
     ) -> str:
         """Idempotently mark an item as processed. Returns the record ID.
 
@@ -383,6 +385,16 @@ class ProcessedStore:
         ``pipeline/scripts/recommend_long_form.py confirm``. When None,
         the field is left untouched on PATCH or omitted on create
         (backward-compatible — callers from Task 1-6 still work).
+
+        ``paywall_preview_kept`` / ``paywall_preview_kind`` (Plan 1,
+        2026-08-17): set by ``news_daily`` when an item was kept as a
+        paywall-preview body. ``paywall_preview_kept`` is a checkbox
+        (``True``/``False``/omitted); ``paywall_preview_kind`` is a
+        singleSelect (``"paywall-preview"`` or
+        ``"short-paywall-preview"``). When ``paywall_preview_kept`` is
+        ``False`` or ``None`` we deliberately do NOT write
+        ``paywall_preview_kind`` so non-preview records keep the field
+        empty.
         """
         source_hash = make_hash(source_type, source_id)
         # Build the field payload (always include processed_at = now)
@@ -405,6 +417,15 @@ class ProcessedStore:
             fields["tags"] = list(tags)
         if article_type:
             fields["article_type"] = article_type
+        # Plan 1 (2026-08-17): paywall preview flags. Only write the
+        # checkbox when True; on PATCH, False would clobber a previous
+        # True (edge case — re-processing a paywall item after it was
+        # already classified). For now we only stamp the record on the
+        # first insert + a True re-classify.
+        if paywall_preview_kept is True:
+            fields["paywall_preview_kept"] = True
+            if paywall_preview_kind:
+                fields["paywall_preview_kind"] = paywall_preview_kind
 
         # Path 1: cache hit — update the existing record.
         cached = self._seen_cache.get(source_hash)

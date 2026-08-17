@@ -322,7 +322,14 @@ def _fetch_google_news_text(item, delay_sec: float = 1.0) -> Optional[str]:
     item["_original_gn_url"] = raw_url
 
     # ─── Paywall pass 1: URL pattern (early detection, before HTTP) ────
-    if _is_paywalled_url(decoded_url):
+    # Plan 1.5 (2026-08-17): switched from _is_paywalled_url to
+    # _is_paywall_url_pattern_only so that GN-decoded URLs on host-blacklisted
+    # publishers (e.g. spiegel.de/wirtschaft/..., welt.de/.../standard)
+    # are NOT early-dropped. They fall through to the fetch + char_count +
+    # had_hint path and get the same keep-as-preview / drop decision as
+    # the RSS path. WELT+ hex / Spiegel+ uuid / FAZ+ /premium/ URLs still
+    # match the path pattern and are still early-dropped.
+    if _is_paywall_url_pattern_only(decoded_url):
         item["_paywalled"] = True
         item["_paywall_reason"] = "url-pattern"
         logger.info(
@@ -424,6 +431,54 @@ _PAYWALL_PATH_REGEXES = [
 ]
 
 
+# --------------------------------------------------------------------------- #
+# Plan 1 (2026-08-17): Paywall 預覽門檻保留.
+#
+# 舊邏輯(Layer 0)只要 URL 命中 host blacklist(Spiegel/Handelsblatt/FAZ/WELT/
+# WiWo/ZEIT/Manager Magazin 等)就 early drop。新邏輯改跑 fetch_full_text
+# 並依 char_count + had_paywall_hint 判定:
+#   - had_hint=True AND >=1500c  → KEEP as paywall-preview
+#   - had_hint=True AND 800-1500c → KEEP as short-paywall-preview
+#   - char_count < 800           → DROP
+#   - had_hint=False             → 走全文路徑(content_kind: full-article)
+# WELT+ hex / Spiegel+ uuid 這類「URL pattern 就能確定」的真一字都拿不到的
+# item 仍維持 early drop(由 _is_paywalled_url 判定)。
+# --------------------------------------------------------------------------- #
+
+# Paywall-preview 判定的字數門檻(Plan 1, 2026-08-17)。
+_PAYWALL_PREVIEW_KEEP_CHARS = 1500      # had_hint=True 且 >= 此值 → paywall-preview
+_PAYWALL_PREVIEW_SHORT_CHARS = 800      # had_hint=True 且 >= 此值 < 1500 → short-paywall-preview
+                                        # 短於此值一律 DROP(不論 hint 與否)
+
+
+def _decide_paywall_preview(
+    char_count: int, had_paywall_hint: bool,
+) -> tuple[str, str]:
+    """Plan 1 (2026-08-17) Paywall 預覽判定矩陣。
+
+    依 ``rss_fetch.fetch_full_text`` 回傳的 ``char_count`` 與
+    ``had_paywall_hint`` 決定該 item 的歸屬:
+
+    - ``("keep", "paywall-preview")``         hint=True 且 char_count >= 1500
+    - ``("keep", "short-paywall-preview")``   hint=True 且 800 <= char_count < 1500
+    - ``("drop", "")``                        char_count < 800(無論 hint)
+    - ``("full", "full-article")``            had_hint=False(全文路徑)
+
+    呼叫端負責把 ``content_kind`` 串到 ``item`` 上並決定是否繼續翻譯/
+    寫入 vault。`decision` 對應到:
+      ``"keep"`` → 保留並標 paywall-preview
+      ``"drop"`` → 丟掉
+      ``"full"`` → 走全文翻譯路徑(原 paywall 邏輯不變)
+    """
+    if not had_paywall_hint:
+        return "full", "full-article"
+    if char_count >= _PAYWALL_PREVIEW_KEEP_CHARS:
+        return "keep", "paywall-preview"
+    if char_count >= _PAYWALL_PREVIEW_SHORT_CHARS:
+        return "keep", "short-paywall-preview"
+    return "drop", ""
+
+
 def _is_paywalled_url(url: str) -> bool:
     """Return True if ``url`` matches any known paywall signal.
 
@@ -463,6 +518,32 @@ def _is_paywalled_url(url: str) -> bool:
     return False
 
 
+def _is_paywall_url_pattern_only(url: str) -> bool:
+    """Plan 1 (2026-08-17): return True only for paywall path patterns.
+
+    Mirrors :func:`_is_paywalled_url` Layer 1 (path substring) + Layer 3
+    (path regex) — but **excludes** the Layer 2 host blacklist. Use this
+    when you want to early-drop URLs that are *guaranteed* to have no
+    content (e.g. WELT+ ``/plus6a37f...``, Spiegel+ ``/a-{uuid}``,
+    FAZ+ ``/premium/``) but still try a fetch on host-blacklist items
+    that *might* have a preview body.
+
+    Task spec: "WELT+ hex 仍 early drop" — only the path-pattern layer
+    can guarantee "一字都拿不到", so we keep the early-drop on those
+    while letting host-blacklist-only URLs flow through to fetch.
+    """
+    if not url:
+        return False
+    u = url.lower()
+    for pat, _reason in _PAYWALL_URL_PATTERNS:
+        if pat in u:
+            return True
+    for rx, _reason in _PAYWALL_PATH_REGEXES:
+        if rx.search(u):
+            return True
+    return False
+
+
 def step_fetch_full_text(items, delay_sec=1.0):
     """Step 2.5: enrich surviving items with fetched article body.
 
@@ -482,23 +563,31 @@ def step_fetch_full_text(items, delay_sec=1.0):
     Such items are dropped here so LLM tokens aren't wasted translating a
     "this article is paywalled" stub.
 
-    Paywall handling for RSS sources (Task 13, 2026-08-09): ``rss_fetch``'s
-    ``fetch_full_text_for_items`` flags paywall via URL/content heuristics
-    but does NOT drop the item — it returns the truncated body anyway.
-    We post-process the result here so that RSS items on the paywall host
-    blacklist (Spiegel, WELT, Manager Magazin, etc.) are also dropped
-    instead of being translated into a "sorry, this is paywalled" stub.
+    Paywall handling for RSS sources (Task 13, 2026-08-09 + Plan 1,
+    2026-08-17): previously, any RSS item whose URL matched the paywall
+    host blacklist (Spiegel, WELT, Manager Magazin, etc.) was dropped at
+    Layer 0 BEFORE fetching — wasting the preview body. Plan 1 changes
+    this: host-blacklist-only matches (no path pattern) are now fetched
+    and judged by ``_decide_paywall_preview(char_count, had_paywall_hint)``.
+    Path-pattern matches (``/plus6a...``, ``/a-{uuid}``, ``/premium/``,
+    etc.) are still early-dropped since those URLs return zero content.
+    After ``rss_fetch`` runs, items flagged with ``had_paywall_hint=True``
+    are again evaluated by ``_decide_paywall_preview`` so the same
+    threshold is applied uniformly — both for host-blacklist items
+    (detected pre-fetch) and unlisted-host items where rss_fetch's
+    content heuristic fired post-fetch.
     """
     keep = []
     skipped_paywall = 0
     skipped_empty = 0
+    preview_fetched = 0  # host-blacklist items we re-routed through fetch
     for it in items:
-        # Layer 0 (Task 13): pre-flight paywall check on the URL for ALL
-        # items, including RSS sources whose RSS <link> already points at
-        # the publisher URL (e.g. Spiegel Wirtschaft RSS → spiegel.de).
-        # This catches items before we even fire an HTTP request.
         item_url = it.get("url", "")
-        if _is_paywalled_url(item_url):
+
+        # Layer 0a (Plan 1, 2026-08-17): path-pattern early drop.
+        # WELT+ hex, Spiegel+/MM uuid, FAZ+ /premium/, /paywall/, /epaper/
+        # — these URLs return zero content, so don't even try to fetch.
+        if _is_paywall_url_pattern_only(item_url):
             it["_paywalled"] = True
             it["_paywall_reason"] = "rss-url-pattern"
             skipped_paywall += 1
@@ -508,6 +597,17 @@ def step_fetch_full_text(items, delay_sec=1.0):
             )
             continue
 
+        # Layer 0b (Plan 1, 2026-08-17): host-blacklist early-drop REMOVED.
+        # Previously, an item on www.spiegel.de / www.welt.de / etc. was
+        # dropped here with reason "rss-url-pattern" even though some of
+        # those pages actually expose a usable preview body. New path:
+        #   - If the source already supplied a body (no_full_text, handled
+        #     by Google News path), use that.
+        #   - Otherwise, run rss_fetch.fetch_full_text(url) once, set
+        #     char_count + had_paywall_hint, and mark _fetch_done=True so
+        #     fetch_full_text_for_items() below skips it.
+        #   - The post-fetch Layer 2 will then call _decide_paywall_preview
+        #     to decide keep-as-preview / drop / keep-as-full.
         if it.get("no_full_text"):
             full_text = _fetch_google_news_text(it, delay_sec=delay_sec)
             if full_text == "<PAYWALLED>":
@@ -524,33 +624,143 @@ def step_fetch_full_text(items, delay_sec=1.0):
             it["content_html"] = full_text
             it["_fetch_done"] = True  # mark so fetch_full_text_for_items skips
             keep.append(it)
-        else:
+            continue
+
+        # Plan 1: host-blacklist items (e.g. Spiegel Wirtschaft RSS) get a
+        # pre-emptive single-item fetch so we can decide whether their
+        # preview body is worth keeping. The result is stored on the item
+        # so the batch fetch below (fetch_full_text_for_items) skips it
+        # via the _fetch_done flag.
+        host_blacklisted = bool(item_url) and _is_paywalled_url(item_url)
+        if host_blacklisted:
+            try:
+                fetch_result = rss_fetch.fetch_full_text(item_url)
+            except Exception as e:  # noqa: BLE001
+                logger.info(
+                    "[paywall-preview fetch failed] %s | %s | %s",
+                    it.get("source_name", "?"), item_url[:80],
+                    type(e).__name__,
+                )
+                fetch_result = {
+                    "full_text": None, "paywalled": False, "char_count": 0,
+                    "had_paywall_hint": False, "error": f"{type(e).__name__}: {e}",
+                }
+            char_count = int(fetch_result.get("char_count") or 0)
+            had_hint = bool(fetch_result.get("had_paywall_hint"))
+            decision, content_kind = _decide_paywall_preview(char_count, had_hint)
+            it["_fetch_done"] = True
+            it["_host_blacklisted"] = True
+            it["full_text_chars"] = char_count
+            it["full_text_paywalled"] = bool(fetch_result.get("paywalled"))
+            it["had_paywall_hint"] = had_hint
+            it["full_text_error"] = fetch_result.get("error")
+            text = fetch_result.get("full_text") or ""
+            if decision == "keep":
+                # paywall-preview / short-paywall-preview: keep body for vault
+                it["full_text"] = text
+                it["content_html"] = text
+                it["_paywall_preview_kept"] = True
+                it["_paywall_preview_kind"] = content_kind
+                it["content_kind"] = content_kind
+                it["_paywall_reason"] = "host-blacklist-preview"
+                preview_fetched += 1
+                logger.info(
+                    "[paywall-preview kept] %s | %d chars, hint=%s → %s",
+                    it.get("source_name", "?"), char_count, had_hint, content_kind,
+                )
+                keep.append(it)
+                continue
+            if decision == "drop":
+                it["_paywalled"] = True
+                it["_paywall_reason"] = "host-blacklist-short"
+                skipped_paywall += 1
+                logger.info(
+                    "[paywall-detected] host-blacklist short (%d chars) | %s | %s",
+                    char_count, it.get("source_name", "?"), item_url[:80],
+                )
+                continue
+            # decision == "full": had_hint=False on a blacklisted host —
+            # the publisher returned a usable body. Fall through to the
+            # normal full-text batch so translate sees the body.
+            it["full_text"] = text
+            it["content_html"] = text
+            it["content_kind"] = content_kind  # "full-article"
+            logger.info(
+                "[paywall-bypassed] %s host-blacklisted but body usable (%d chars)",
+                it.get("source_name", "?"), char_count,
+            )
             keep.append(it)
+            continue
+
+        # Default path: not flagged, not blacklisted, not no_full_text —
+        # defer to the batch fetch below.
+        keep.append(it)
+
     if skipped_paywall:
         logger.info("[paywall] dropped %d item(s) at fetch stage", skipped_paywall)
     if skipped_empty:
         logger.info("[no_full_text] skipped %d item(s) with empty content", skipped_empty)
+    if preview_fetched:
+        logger.info(
+            "[paywall-preview] kept %d item(s) as paywall-preview / short-paywall-preview",
+            preview_fetched,
+        )
 
     result = rss_fetch.fetch_full_text_for_items(keep, delay_sec=delay_sec)
-    # Layer 2 (Task 13): post-fetch, drop RSS items that rss_fetch
-    # itself flagged as paywalled (e.g. via its paywall-hint heuristics
-    # like cookie banners, "abonnement" body text, etc.). Without this,
-    # a host we DIDN'T blacklist (like Boersen-News or a regional
-    # outlet) could slip through and waste LLM tokens.
+    # Layer 2 (Task 13 + Plan 1): post-fetch, apply paywall decision.
+    #
+    # Two flavours of paywall signal can surface here:
+    #   (a) ``_paywalled`` / ``paywalled_flag`` set by rss_fetch itself
+    #       (cookie banners, "Abo erforderlich" body text, etc.)
+    #   (b) ``had_paywall_hint=True`` from rss_fetch's body-text scan
+    #
+    # Plan 1 (2026-08-17) routes (b) through ``_decide_paywall_preview``
+    # so we keep the preview body (800-1500c → short-paywall-preview;
+    # >=1500c → paywall-preview) instead of dropping. Only items that
+    # BOTH have a hint AND come back with <800 chars are dropped.
+    # Items without a hint fall through to the full-article path.
     final = []
     extra_dropped = 0
+    extra_preview = 0
     for it in result:
-        if it.get("_paywalled") or it.get("paywalled_flag"):
+        had_hint = bool(it.get("had_paywall_hint") or it.get("full_text_paywalled"))
+        if it.get("_paywalled") or (it.get("paywalled_flag") and not had_hint):
             extra_dropped += 1
             logger.info(
                 "[paywall-detected] rss_fetch hint | %s | %s",
                 it.get("url", "")[:80], it.get("title", "")[:50],
             )
             continue
+        if had_hint and not it.get("_paywall_preview_kept"):
+            char_count = int(it.get("full_text_chars") or 0)
+            decision, content_kind = _decide_paywall_preview(char_count, True)
+            if decision == "drop":
+                it["_paywalled"] = True
+                it["_paywall_reason"] = "rss-fetch-hint-short"
+                extra_dropped += 1
+                logger.info(
+                    "[paywall-detected] rss-fetch hint short (%d chars) | %s",
+                    char_count, it.get("url", "")[:80],
+                )
+                continue
+            if decision == "keep":
+                it["_paywall_preview_kept"] = True
+                it["_paywall_preview_kind"] = content_kind
+                it["content_kind"] = content_kind
+                it["_paywall_reason"] = "rss-fetch-hint-preview"
+                extra_preview += 1
+                logger.info(
+                    "[paywall-preview kept] rss-fetch hint | %d chars → %s",
+                    char_count, content_kind,
+                )
         final.append(it)
     if extra_dropped:
         logger.info(
             "[paywall] dropped %d more item(s) via rss_fetch hint", extra_dropped
+        )
+    if extra_preview:
+        logger.info(
+            "[paywall-preview] kept %d more item(s) via rss_fetch hint", extra_preview
         )
     return final
 
@@ -681,6 +891,14 @@ def step_write_vault(items, cfg, content_kind: str = "longform"):
     delete long-form artifacts (and vice versa) when both modes coexist
     in the same daily folder.
 
+    Plan 1 (2026-08-17): each item may carry its own ``content_kind``
+    (e.g. ``"paywall-preview"``, ``"short-paywall-preview"``) set by
+    :func:`step_fetch_full_text`. We honour that per-item kind when
+    present (so a paywall-preview file gets ``_paywallpreview.md``
+    suffix) and fall back to the function-level ``content_kind`` for
+    regular items. Wipe is now scoped to the union of all suffixes that
+    will be written in this run.
+
     Returns a dict mapping each item to its written output path (used by
     :func:`step_mark_processed` to record ``output_path`` in the ledger).
     """
@@ -692,25 +910,39 @@ def step_write_vault(items, cfg, content_kind: str = "longform"):
     github_url = f"{cfg.get('github', {}).get('owner', '')}/{cfg.get('github', {}).get('repo', '')}"
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
     out_dir = os.path.join(vault_root, "Daily", date_str)
-    # Wipe only files of *this* content_kind so short + long can coexist.
-    # Disable with cfg.vault.wipe=False or VAULT_KEEP=1.
+    # Plan 1: collect the suffix for each item so we wipe every suffix
+    # we'll write this run, not just the global content_kind's suffix.
+    # Use the suffix map from obsidian so the wipe stays in sync if new
+    # content_kind values are added later.
+    per_item_kinds = [
+        it.get("content_kind") or content_kind for it in items
+    ]
+    suffixes = {
+        obsidian._CONTENT_KIND_SUFFIX.get(k, "_longform")
+        for k in per_item_kinds
+    }
+    # Wipe only files of *this* content_kind so short + long + paywall
+    # can coexist. Disable with cfg.vault.wipe=False or VAULT_KEEP=1.
     wipe = vault_cfg.get("wipe", True) and os.environ.get("VAULT_KEEP") != "1"
     wiped = False
     if wipe and os.path.isdir(out_dir):
-        suffix_glob = "_summary.md" if content_kind == "short-summary" else "_longform.md"
-        for p in Path(out_dir).glob(f"*{suffix_glob}"):
-            p.unlink()
+        for suffix in suffixes:
+            for p in Path(out_dir).glob(f"*{suffix}.md"):
+                p.unlink()
         wiped = True
     item_paths: dict[int, str] = {}
     for i, it in enumerate(items):
+        # Per-item content_kind takes precedence (Plan 1), else global.
+        item_kind = it.get("content_kind") or content_kind
         path = obsidian.write_news_item(it, vault_root, date_str,
-                                        content_kind=content_kind)
+                                        content_kind=item_kind)
         item_paths[i] = path
-    # Index file is shared across both modes in the same daily folder —
+    # Index file is shared across all modes in the same daily folder —
     # only the first call writes it.
     index_path = obsidian.write_daily_index(items, vault_root, date_str, github_url)
+    kinds_summary = ",".join(sorted(suffixes)) or "?"
     print(f"  wrote {len(item_paths) + 1} files under {vault_root}/Daily/{date_str}/"
-          f" (kind={content_kind}{' wiped existing' if wiped else ''})")
+          f" (suffixes={kinds_summary}{' wiped existing' if wiped else ''})")
     return {"items": items, "item_paths": item_paths, "index_path": index_path}
 
 
@@ -856,6 +1088,10 @@ def _build_news_metadata(item: dict, date_str: str) -> dict:
     item was dropped at fetch time). Without these fields, you can't tell
     from the Airtable ledger whether a record came from a paywalled
     publisher or what the real article URL was.
+
+    Plan 1 (2026-08-17) also persists ``paywall_preview_kept`` and
+    ``paywall_preview_kind`` for items whose body was kept as a
+    paywall-preview (host-blacklist item with >= 800 chars of preview).
     """
     epoch = item.get("pub_date_epoch")
     if epoch is None and isinstance(item.get("pub_date"), str):
@@ -881,6 +1117,14 @@ def _build_news_metadata(item: dict, date_str: str) -> dict:
     if item.get("_paywalled"):
         meta["paywalled"] = True
         meta["paywall_reason"] = item.get("_paywall_reason", "unknown")
+    # Plan 1 (2026-08-17): paywall preview markers in metadata JSON.
+    if item.get("_paywall_preview_kept"):
+        meta["paywall_preview_kept"] = True
+        meta["paywall_preview_kind"] = item.get("_paywall_preview_kind", "")
+    if item.get("had_paywall_hint") is not None:
+        meta["had_paywall_hint"] = bool(item.get("had_paywall_hint"))
+    if item.get("full_text_chars") is not None:
+        meta["full_text_chars"] = int(item.get("full_text_chars") or 0)
     return meta
 
 
@@ -931,6 +1175,13 @@ def step_mark_processed(
                 metadata=_build_news_metadata(item, date_str),
                 tags=[],
                 article_type=article_type,
+                # Plan 1 (2026-08-17): stamp the paywall preview flags
+                # so the Airtable ledger can be filtered / reported on
+                # by ``paywall_preview_kept=True``.
+                paywall_preview_kept=(
+                    True if item.get("_paywall_preview_kept") else None
+                ),
+                paywall_preview_kind=item.get("_paywall_preview_kind") or None,
             )
             record_ids.append(record_id)
             logger.info(

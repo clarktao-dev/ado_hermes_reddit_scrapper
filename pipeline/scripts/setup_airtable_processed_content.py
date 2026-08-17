@@ -172,6 +172,13 @@ def field_to_api_shape(f: Dict[str, Any]) -> Dict[str, Any]:
             "timeFormat": {"name": "24hour", "format": "HH:mm"},
             "timeZone": "utc",
         }
+    elif t == "checkbox":
+        # Plan 1 (2026-08-17): Airtable checkbox requires {"icon", "color"}.
+        # Default to "check" / "greenBright" if the schema omits options.
+        out["options"] = f.get("options") or {
+            "icon": "check",
+            "color": "greenBright",
+        }
     return out
 
 

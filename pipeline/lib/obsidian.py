@@ -43,6 +43,23 @@ def _slugify(text, max_len=80):
     return s[:max_len].rstrip("-")
 
 
+# Map of content_kind → filename suffix. Module-level so other modules
+# (e.g. ``news_daily.step_write_vault``) can look up the suffix for a
+# batch wipe without duplicating the mapping.
+#
+# Plan 1 (2026-08-17) added:
+#   - ``paywall-preview``         → ``_paywallpreview``
+#   - ``short-paywall-preview``   → ``_shortpaywallpreview``
+# These coexist with the legacy ``_summary`` and ``_longform`` suffixes;
+# all four can live side-by-side in the same daily folder.
+_CONTENT_KIND_SUFFIX = {
+    "short-summary":          "_summary",
+    "longform":               "_longform",
+    "paywall-preview":        "_paywallpreview",
+    "short-paywall-preview":  "_shortpaywallpreview",
+}
+
+
 def write_news_item(item, vault_root, date_str, strict_traditional=True,
                      content_kind: str = "longform"):
     """Write a single news item as a markdown file in vault/Daily/{date}/.
@@ -56,6 +73,12 @@ def write_news_item(item, vault_root, date_str, strict_traditional=True,
     ``_summary.md`` instead of the legacy ``.md``/``_longform.md``. This
     lets a daily ``--mode short`` news run coexist with on-demand
     ``--mode long`` outputs in the same date folder.
+
+    Plan 1 (2026-08-17): ``content_kind`` accepts two new values for
+    paywall-preview items so the suffix explicitly tags the kind:
+      - ``"paywall-preview"``       → ``_paywallpreview.md``
+      - ``"short-paywall-preview"`` → ``_shortpaywallpreview.md``
+    Both fall back to ``_longform`` for unknown content_kind values.
     """
     # Gate: run every SYSTEM-prompt rule. Reject if any error-level fails.
     _validate_against_system_prompt(item, strict=strict_traditional)
@@ -75,7 +98,7 @@ def write_news_item(item, vault_root, date_str, strict_traditional=True,
 
     src_id = item.get("source_id", "unknown")
     title_slug = _slugify(item.get("title", "untitled"), max_len=50)
-    suffix = "_summary" if content_kind == "short-summary" else "_longform"
+    suffix = _CONTENT_KIND_SUFFIX.get(content_kind, "_longform")
     fname = f"{src_id}-{title_slug}{suffix}.md"
     path = os.path.join(out_dir, fname)
 
@@ -99,10 +122,13 @@ date: {date_str}
 fetched: {datetime.utcnow().strftime('%Y-%m-%d')}
 title_de: "{item.get('title', '').replace(chr(34), '')}"
 title_zh: "{item.get('title_zh', '').replace(chr(34), '')}"
+content_kind: {content_kind}
 tags: [{tags_yaml}]
 priority: {item.get('priority', 99)}
 relevance_rank: {item.get('relevance_rank', 0)}
----
+{f'''paywall_preview_kept: {str(bool(item.get('_paywall_preview_kept'))).lower()}
+paywall_preview_kind: "{item.get('_paywall_preview_kind', '')}"
+''' if item.get('_paywall_preview_kept') else ''}---
 
 # {item.get('title', '')}
 

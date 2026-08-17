@@ -126,6 +126,26 @@
       "type": "singleLineText",
       "required": false,
       "description": "Side-effect: GitHub commit SHA that pushed the artifact to the repo."
+    },
+    {
+      "name": "paywall_preview_kept",
+      "type": "checkbox",
+      "required": false,
+      "options": {
+        "icon": "check",
+        "color": "yellowBright"
+      },
+      "description": "Plan 1 (2026-08-17): True when this record represents a paywall-preview body (host was on the paywall host blacklist but the fetch returned >= 800 chars of preview text). False for all other records."
+    },
+    {
+      "name": "paywall_preview_kind",
+      "type": "singleSelect",
+      "required": false,
+      "options": [
+        "paywall-preview",
+        "short-paywall-preview"
+      ],
+      "description": "Plan 1 (2026-08-17): sub-classification for paywall-preview items. ``paywall-preview`` (>= 1500 chars) or ``short-paywall-preview`` (800-1500 chars). Empty for non-paywall records."
     }
   ],
   "views": [

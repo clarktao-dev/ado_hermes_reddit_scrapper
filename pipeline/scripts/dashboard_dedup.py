@@ -183,6 +183,13 @@ def _format_found(record: Dict[str, Any]) -> str:
     lines.append(f"  github_commit_sha: {fields.get('github_commit_sha', '')}")
     lines.append(f"  pipeline_run_id: {fields.get('pipeline_run_id', '')}")
     lines.append(f"  output_path: {fields.get('output_path', '')}")
+    # Plan 1 (2026-08-17): paywall preview flags — show them in `find`
+    # so the user can confirm a paywall-preview record was stamped.
+    if fields.get("paywall_preview_kept") is not None:
+        lines.append(f"  paywall_preview_kept: {fields.get('paywall_preview_kept')}")
+        lines.append(
+            f"  paywall_preview_kind: {fields.get('paywall_preview_kind', '')}"
+        )
     return "\n".join(lines)
 
 
