@@ -25,9 +25,9 @@ VAULT_ROOT = pathlib.Path(
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 
 CHANNEL_MAP = {
-    "Daily": "1520791894995501106",  # #每日頭條
-    "Reddit": "1537907956132089976",  # #每日reddit
-    # YouTube 暫時不處理 (vault 結構跟 Daily/Reddit 不同,在 channel subdirs)
+    "Daily": "1520791894995501106",    # #每日頭條
+    "Reddit": "1537907956132089976",   # #每日reddit
+    "YouTube": "1535461574460968960",  # #每日podcast (Plan 5, 2026-08-18)
 }
 
 # 訊息長度上限 — Discord message hard limit 2000,留 buffer
@@ -101,7 +101,12 @@ def render_message(kind: str, title: str, snippet: str, url: Optional[str], vaul
 
 
 def scan_today_vault(day_str: Optional[str] = None) -> list[dict]:
-    """掃今天(或指定日期)的 vault,回傳所有可推送項目。"""
+    """掃今天(或指定日期)的 vault,回傳所有可推送項目。
+
+    Plan 5 (2026-08-18): Daily/Reddit 仍為兩層 ``{vault_root}/{sub}/{date}/``,
+    YouTube 改為三層 ``{vault_root}/YouTube/{date}/{channel}/`` — 同一個
+    影片的 transcript + summary 都會被撈出來,透過 ``kind`` 欄位區分。
+    """
     if day_str is None:
         day_str = date.today().isoformat()
     items = []
@@ -110,28 +115,45 @@ def scan_today_vault(day_str: Optional[str] = None) -> list[dict]:
         if not day_dir.exists():
             logger.warning("dir not found: %s", day_dir)
             continue
-        for f in sorted(day_dir.glob("*.md")):
-            if f.name == "_index.md":
-                continue
-            try:
-                text = f.read_text(encoding="utf-8")
-            except Exception as e:
-                logger.warning("read failed %s: %s", f, e)
-                continue
-            try:
-                title, snippet, url = parse_frontmatter_and_body(text)
-            except Exception as e:
-                logger.warning("parse failed %s: %s", f, e)
-                continue
-            items.append({
-                "kind": vault_subdir.lower(),
-                "title": title,
-                "snippet": snippet,
-                "url": url,
-                "vault_path": str(f),
-                "channel_id": channel_id,
-            })
+        if vault_subdir == "YouTube":
+            # YouTube uses {date}/{channel}/ — iterate channel subdirs.
+            for channel_dir in sorted(day_dir.iterdir()):
+                if not channel_dir.is_dir():
+                    continue
+                for f in sorted(channel_dir.glob("*.md")):
+                    item = _build_item(f, "youtube", channel_id, channel_dir.name)
+                    if item:
+                        items.append(item)
+        else:
+            for f in sorted(day_dir.glob("*.md")):
+                item = _build_item(f, vault_subdir.lower(), channel_id, "")
+                if item:
+                    items.append(item)
     return items
+
+
+def _build_item(f, kind: str, channel_id: str, channel_label: str) -> Optional[dict]:
+    if f.name == "_index.md":
+        return None
+    try:
+        text = f.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning("read failed %s: %s", f, e)
+        return None
+    try:
+        title, snippet, url = parse_frontmatter_and_body(text)
+    except Exception as e:
+        logger.warning("parse failed %s: %s", f, e)
+        return None
+    return {
+        "kind": kind,
+        "title": title,
+        "snippet": snippet,
+        "url": url,
+        "vault_path": str(f),
+        "channel_id": channel_id,
+        "channel_label": channel_label,
+    }
 
 
 def main() -> int:

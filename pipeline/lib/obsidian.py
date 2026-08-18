@@ -1,14 +1,82 @@
 """Obsidian vault writer.
 
-Produces markdown files in vault/Daily/YYYY-MM-DD/ and vault/YouTube/{Channel}/
-with YAML frontmatter so Dataview queries and Obsidian plugins can read them.
+Produces markdown files in vault/Daily/YYYY-MM-DD/ with YAML frontmatter so
+Dataview queries and Obsidian plugins can read them.
+
+Plan 5 (2026-08-18): filename schema switched to the new format
+    ``{YYYY-MM-DD}_{src_short}_{kind_token}_{slug}.md``
+e.g. ``2026-08-18_hbl_longform_rueckgang-im-sueden-preise-fuer.md``.
+
+The ``source_id`` field in the frontmatter is preserved unchanged so downstream
+readers (ProcessedContent ledger, daily_digest) keep working.
 """
 import os
-import shutil
 import re
 import sys
 from datetime import datetime
-from urllib.parse import urlparse
+
+
+# Source ID (canonical id used by RSS fetchers / ProcessedContent ledger) →
+# short code used inside the vault filename. Mirrors the constants in
+# ``/tmp/vault_path_map_dryrun.py`` v3 so a newly-written Daily file can be
+# read back by ``push_vault_to_channels`` / ``daily_digest`` without a
+# second translation pass.
+#
+# Adding a new source?  Add the long id here AND in vault_path_map_dryrun.SOURCE_SHORT.
+SOURCE_SHORT = {
+    "handelsblatt_immobilien": "hbl", "handelsblatt": "hbl",
+    "faz_immobilien": "faz", "faz": "faz",
+    "ntv_wirtschaft": "ntv", "ntv": "ntv",
+    "spiegel_immobilien": "spiegel", "spiegel": "spiegel",
+    "zeit_wirtschaft": "zeit", "zeit": "zeit",
+    "google_news_immobilien": "gn",
+    "wohnen": "r-wohnen",
+    "finanzen": "r-finanzen",
+    "immoscoutwildgeworden": "r-immoscout",
+    "immobilieninvestments": "r-immobinv",
+    "1alage-immobilienpodcast": "1alage",
+    "alexander-schmid-podcast": "alexander-schmid",
+    "der-ex-makler": "ex-makler",
+    "finanzfluss": "finanzfluss",
+    "immocation": "immocation",
+    "insights-immo": "insights-immo",
+    "mr-steuer": "mr-steuer",
+    "so-geht-brandschutz": "so-geht-brandschutz",
+    "auftragseingang_bauhauptgewerbe": "destatis",
+    "genehmigte_wohnungen_monat": "destatis",
+    "investments_construction": "destatis",
+    "destatis_csv": "destatis",
+}
+
+
+def _resolve_src_short(item: dict) -> str:
+    """Map a news item dict → the short source code used in filenames.
+
+    Order of resolution:
+      1. ``item["source_id"]``  (canonical id from RSS fetchers)
+      2. ``item["source"]`` / ``item["source_name"]``  (human name, lowercased)
+      3. ``"unknown"``
+
+    The short code is also written into the YAML frontmatter as
+    ``src_short`` so the pusher can read it back without re-resolving.
+    """
+    sid = (item.get("source_id") or "").lower()
+    if sid in SOURCE_SHORT:
+        return SOURCE_SHORT[sid]
+    sname = (item.get("source") or item.get("source_name") or "").lower()
+    if sname in SOURCE_SHORT:
+        return SOURCE_SHORT[sname]
+    return "unknown"
+
+
+# Plan 5 (2026-08-18): kind tokens that go inside the filename. There is no
+# default fallback — ``write_news_item`` raises if you pass an unknown kind.
+_KIND_TOKEN = {
+    "longform":               "longform",
+    "short-summary":          "summary",
+    "paywall-preview":        "paywallpreview",
+    "short-paywall-preview":  "shortpaywallpreview",
+}
 
 
 def _check_traditional(item, strict=True):
@@ -36,52 +104,64 @@ def _validate_against_system_prompt(item, strict=True):
         )
 
 
-def _slugify(text, max_len=80):
-    """ASCII-safe slug for filenames."""
-    s = re.sub(r"[^a-zA-Z0-9äöüÄÖÜß-]+", "-", text)
+def _slugify(text, max_len=40):
+    """ASCII-safe slug for filenames.
+
+    Plan 5 (2026-08-18): German umlauts are transliterated BEFORE
+    lowercasing so titles like ``Rückgang`` become ``rueckgang`` and
+    not ``rückgang`` (which the regex below would have collapsed to
+    ``rückgang`` and then lost in the second ``[^a-z0-9-]`` pass).
+
+    If the slug still exceeds ``max_len`` after stripping punctuation,
+    we rsplit on the last ``-`` so the cut lands on a word boundary.
+    """
+    if not text:
+        return "untitled"
+    t = text
+    t = t.replace("Ä", "Ae").replace("Ö", "Oe").replace("Ü", "Ue")
+    t = t.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
+    t = t.replace("ß", "ss")
+    s = re.sub(r"[^a-zA-Z0-9-]+", "-", t)
     s = re.sub(r"-+", "-", s).strip("-").lower()
-    return s[:max_len].rstrip("-")
-
-
-# Map of content_kind → filename suffix. Module-level so other modules
-# (e.g. ``news_daily.step_write_vault``) can look up the suffix for a
-# batch wipe without duplicating the mapping.
-#
-# Plan 1 (2026-08-17) added:
-#   - ``paywall-preview``         → ``_paywallpreview``
-#   - ``short-paywall-preview``   → ``_shortpaywallpreview``
-# These coexist with the legacy ``_summary`` and ``_longform`` suffixes;
-# all four can live side-by-side in the same daily folder.
-_CONTENT_KIND_SUFFIX = {
-    "short-summary":          "_summary",
-    "longform":               "_longform",
-    "paywall-preview":        "_paywallpreview",
-    "short-paywall-preview":  "_shortpaywallpreview",
-}
+    if len(s) > max_len:
+        s = s[:max_len].rsplit("-", 1)[0].rstrip("-")
+    return s or "untitled"
 
 
 def write_news_item(item, vault_root, date_str, strict_traditional=True,
                      content_kind: str = "longform"):
     """Write a single news item as a markdown file in vault/Daily/{date}/.
+
+    Plan 5 (2026-08-18): filename schema is
+        ``{YYYY-MM-DD}_{src_short}_{kind_token}_{slug}.md``
+    e.g. ``2026-08-18_hbl_longform_rueckgang-im-sueden-preise-fuer.md``.
+
+    The YAML frontmatter still carries ``source_id`` (canonical id) and
+    gains a new ``src_short`` field so downstream readers can round-trip
+    the short code without re-resolving.
+
     Returns the absolute path written.
 
     Raises ValueError if the item fails the SYSTEM-prompt validation gate
-    (unless `strict_traditional=False`, in which case it logs and continues).
+    (unless ``strict_traditional=False``, in which case it logs and continues).
 
-    ``content_kind`` (Task 7, 2026-08-09): when ``"short-summary"`` (or
-    anything other than the legacy ``"longform"``), the file is suffixed
-    ``_summary.md`` instead of the legacy ``.md``/``_longform.md``. This
-    lets a daily ``--mode short`` news run coexist with on-demand
-    ``--mode long`` outputs in the same date folder.
-
-    Plan 1 (2026-08-17): ``content_kind`` accepts two new values for
-    paywall-preview items so the suffix explicitly tags the kind:
-      - ``"paywall-preview"``       → ``_paywallpreview.md``
-      - ``"short-paywall-preview"`` → ``_shortpaywallpreview.md``
-    Both fall back to ``_longform`` for unknown content_kind values.
+    ``content_kind`` accepts the four Plan-5 tokens:
+      - ``"longform"``               → ``_longform.md``
+      - ``"short-summary"``          → ``_summary.md``
+      - ``"paywall-preview"``        → ``_paywallpreview.md``
+      - ``"short-paywall-preview"``  → ``_shortpaywallpreview.md``
+    Unknown kinds raise ``ValueError`` (no silent fallback — silent
+    fallbacks were the source of the legacy ``_longform`` confusion).
     """
     # Gate: run every SYSTEM-prompt rule. Reject if any error-level fails.
     _validate_against_system_prompt(item, strict=strict_traditional)
+
+    if content_kind not in _KIND_TOKEN:
+        raise ValueError(
+            f"[obsidian] unknown content_kind={content_kind!r} "
+            f"(expected one of {sorted(_KIND_TOKEN)})"
+        )
+    kind_token = _KIND_TOKEN[content_kind]
 
     # SKILL MODE (2026-08-07): no force_traditional fallback here. The LLM is
     # responsible for emitting Taiwan Traditional Chinese directly (constrained
@@ -97,9 +177,9 @@ def write_news_item(item, vault_root, date_str, strict_traditional=True,
     os.makedirs(out_dir, exist_ok=True)
 
     src_id = item.get("source_id", "unknown")
-    title_slug = _slugify(item.get("title", "untitled"), max_len=50)
-    suffix = _CONTENT_KIND_SUFFIX.get(content_kind, "_longform")
-    fname = f"{src_id}-{title_slug}{suffix}.md"
+    src_short = _resolve_src_short(item)
+    title_slug = _slugify(item.get("title", "untitled"), max_len=40)
+    fname = f"{date_str}_{src_short}_{kind_token}_{title_slug}.md"
     path = os.path.join(out_dir, fname)
 
     # YAML frontmatter
@@ -117,18 +197,20 @@ def write_news_item(item, vault_root, date_str, strict_traditional=True,
 type: news
 source: {item.get('source_name', '')}
 source_id: {src_id}
+src_short: {src_short}
 url: {item.get('url', '')}
 date: {date_str}
 fetched: {datetime.utcnow().strftime('%Y-%m-%d')}
 title_de: "{item.get('title', '').replace(chr(34), '')}"
 title_zh: "{item.get('title_zh', '').replace(chr(34), '')}"
 content_kind: {content_kind}
+kind_token: {kind_token}
 tags: [{tags_yaml}]
 priority: {item.get('priority', 99)}
 relevance_rank: {item.get('relevance_rank', 0)}
 {f'''paywall_preview_kept: {str(bool(item.get('_paywall_preview_kept'))).lower()}
 paywall_preview_kind: "{item.get('_paywall_preview_kind', '')}"
-''' if item.get('_paywall_preview_kept') else ''}---
+|''' if item.get('_paywall_preview_kept') else ''}---
 
 # {item.get('title', '')}
 

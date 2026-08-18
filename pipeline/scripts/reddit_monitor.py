@@ -67,6 +67,24 @@ SUBREDDITS = [
     "wohnen",
 ]
 
+# Plan 5 (2026-08-18): subreddit plain name → short code used in the new
+# filename schema ``{date}_{sub_short}_summary_reddit-{post_id}.md``.
+# Mirrors PODCAST_KB_CHANNELS-style mapping in /tmp/vault_path_map_dryrun.py.
+SUBREDDIT_SHORT = {
+    "immobilieninvestments": "r-immobinv",
+    "finanzen": "r-finanzen",
+    "immoscoutwildgeworden": "r-immoscout",
+    "wohnen": "r-wohnen",
+}
+
+
+def _safe_slug(text: str, max_len: int = 30) -> str:
+    """ASCII-safe kebab slug fallback for unknown subreddit names."""
+    import re as _re
+    s = _re.sub(r"[^a-z0-9-]+", "-", text.lower())
+    s = _re.sub(r"-+", "-", s).strip("-")
+    return (s[:max_len].rsplit("-", 1)[0] if len(s) > max_len else s) or "unknown"
+
 PER_SUB_LIMIT = 10
 PER_SUB_KEEP = 3
 
@@ -230,19 +248,21 @@ def write_vault(per_sub_picks: dict[str, list[dict]], dry_run: bool) -> tuple[Pa
     # Per-post files
     for sub, picks in per_sub_picks.items():
         for it in picks:
-            # sub is like "r/Immobilieninvestments"; flatten to safe filename.
-            safe_sub = sub.replace("/", "_")
-            slug = re.sub(r"[^\w\-一-鿿]+", "-", (it.get("title_zh") or it.get("title", "untitled"))[:60]).strip("-")
-            if not slug:
-                slug = "untitled"
-            post_path = out_dir / f"{safe_sub}-{slug}.md"
+            # Plan 5 (2026-08-18): new filename schema —
+            #   {date}_{sub_short}_summary_reddit-{post_id}.md
+            sub_plain = sub.replace("r/", "").replace("/", "_")
+            sub_short = SUBREDDIT_SHORT.get(sub_plain.lower(),
+                                             "r-" + _safe_slug(sub_plain))
+            post_id = (it.get("_reddit_id") or it.get("source_id")
+                       or it.get("id") or "").strip()
+            slug = f"reddit-{post_id}" if post_id else "untitled"
+            post_path = out_dir / f"{today}_{sub_short}_summary_{slug}.md"
             body = render_post_md(it)
             if not dry_run:
                 post_path.write_text(body, encoding="utf-8")
             # 用 reddit post id 當 key(每篇貼文唯一)
-            reddit_id = it.get("_reddit_id") or it.get("source_id") or it.get("id") or ""
-            if reddit_id:
-                post_paths[reddit_id] = post_path
+            if post_id:
+                post_paths[post_id] = post_path
 
     # Index
     index_lines = [

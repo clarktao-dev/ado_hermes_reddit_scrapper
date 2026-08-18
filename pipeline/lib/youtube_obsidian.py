@@ -1,6 +1,12 @@
 """Write one VideoDigest as a Markdown file under podcast-kb/vault/Daily/YYYY-MM-DD/.
 
 Re-uses the wipe-on-rerun + 0-simplified gate from news pipeline's obsidian.py.
+
+Plan 5 (2026-08-18): filename schema switched to the new format
+    ``{YYYY-MM-DD}_{channel_short}_{kind}_{video_id}.md``
+e.g. ``2026-08-18_finanzfluss_summary_zkW9KjyCTEc.md``.
+The ``channel_name`` field in the body is preserved unchanged so any
+downstream reader still sees the human-readable channel name.
 """
 from __future__ import annotations
 import os
@@ -10,6 +16,33 @@ from pathlib import Path
 from typing import List
 
 from pipeline.lib.translate import force_traditional, has_simplified  # noqa: E402
+
+
+# Channel human name → short code (mirrors PODCAST_KB_CHANNELS in
+# /tmp/vault_path_map_dryrun.py v3).
+CHANNEL_NAME_SHORT = {
+    "1aLAGE Immobilienpodcast": "1alage",
+    "1aLage - Der Immobilienpodcast": "1alage",
+    "1aLage - Der Immobilienpodcast (alter Name)": "1alage",
+    "Alexander Schmid Podcast": "alexander-schmid",
+    "Der Ex-Makler": "ex-makler",
+    "Finanzfluss": "finanzfluss",
+    "Immocation": "immocation",
+    "Insights Immo": "insights-immo",
+    "Mr. Steuer": "mr-steuer",
+    "Mr Steuer": "mr-steuer",
+    "So geht Brandschutz": "so-geht-brandschutz",
+    "Finanztip": "finanztip",
+    "Marktcheck": "marktcheck",
+}
+
+
+def _resolve_channel_short(channel_name: str) -> str:
+    """Map a YouTube channel's display name → the short code used in the
+    filename. Falls back to a slugified lower-case version of the name."""
+    if channel_name in CHANNEL_NAME_SHORT:
+        return CHANNEL_NAME_SHORT[channel_name]
+    return re.sub(r"[^a-z0-9-]+", "-", channel_name.lower()).strip("-") or "unknown"
 
 
 def _slug(text: str, max_len: int = 60) -> str:
@@ -67,8 +100,11 @@ def step_write_vault(digests, repo_root: str, date_str: str | None = None,
     render_fn = _render_short_md if content_kind == "short-summary" else _render_digest_md
     for d in digests:
         try:
-            slug = _slug(f"{d.channel_name}_{d.title}_{d.video_id}")[:80]
-            path = out_dir / f"{slug}{suffix}.md"
+            channel_short = _resolve_channel_short(d.channel_name)
+            # Plan 5 (2026-08-18): new filename schema —
+            # {date}_{channel_short}_{kind}_{video_id}.md
+            fname = f"{date_str}_{channel_short}_{suffix}_{d.video_id}.md"
+            path = out_dir / fname
             content = render_fn(d)
             # Defense in depth: force_traditional on the full content
             if has_simplified(content):
