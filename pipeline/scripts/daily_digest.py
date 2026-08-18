@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
-"""Daily Digest — Plan 3 (2026-08-17)
+"""Daily Digest — Plan 3 (2026-08-17),Plan 4 disable push (2026-08-18)
 
+Plan 3 原本行為
+--------------
 跨 pipeline 統一產出「昨日候選清單」推到 Discord ``digest_candidates``
 頻道,使用者用 emoji reaction(✅/❌/🟡)挑選 → 由 ``discord_picks.py``
 回寫 Airtable ``DailyDigestPicks``。
+
+Plan 4 disable (2026-08-17)
+---------------------------
+User 改為「自己逛 channel 時順手按 ✅」(見 plan-4-passive-reaction-listener.md),
+不再每日被推 15 候選到 ``#挑文區``。所以 main flow 加上 ``--push`` flag,
+**預設 ``--push false``,只 print 不推**(防止手動誤推 / 防止未來有人打開
+cron 時默默又開始打擾)。``--push`` 帶上才走原本 Plan 3 推播流程。
 
 設計
 ----
@@ -19,8 +28,10 @@
 
 CLI
 ----
-- (無參數):跑正常 push(header + 候選 + 寫 Airtable)。
-- ``--dry-run``:只 print 訊息內容,不推 Discord,不寫 Airtable。
+- (無參數):Plan 4 上線後**預設不推**,只 print header + candidates。
+  這是防呆設計 — 防止手動誤觸 cron 或在測試環境不小心推到 channel。
+- ``--push``:實際推到 Discord channel,寫 DailyDigestPicks。
+- ``--dry-run``:永遠只 print,不推(向後相容 Plan 3 行為)。
 - ``--test-pick MESSAGE_ID EMOJI``:模擬一次 emoji reaction —
   在 ``DailyDigestPicks`` 找對應 message_id 的 row 寫入
   ``picked / picked_at / discord_user_id``。測試流程用。
@@ -718,15 +729,38 @@ def _digest_date_str(now: Optional[datetime] = None) -> str:
     return (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
 
 
-def run_push(days: int = DEFAULT_DAYS, dry_run: bool = False) -> int:
+def run_push(
+    days: int = DEFAULT_DAYS,
+    push: bool = False,
+    dry_run: bool = False,
+) -> int:
+    """Plan 3 推播主流程。Plan 4 上線後 ``push`` 預設 False(只 print)。
+
+    - ``dry_run=True``:永遠只 print,return 0(向後相容 Plan 3)。
+    - ``push=True``:實際推 Discord + 寫 DailyDigestPicks(Plan 3 原本行為)。
+    - ``push=False``(預設):Plan 4 防呆 — 只 print header + candidates,
+      不推 Discord,不寫 Airtable。防止手動誤推 / cron 不小心打開時
+      又開始每日打� user。
+    """
     store = ProcessedStore(BASE_ID, PROCESSED_TABLE)
     pool = fetch_candidates(store, days=days)
     selected = apply_quota(pool)
     digest_date = _digest_date_str()
     header = render_header(len(selected), len(pool), digest_date)
 
-    if dry_run:
+    # 兩種「只 print」路徑(dry_run 向後相容 + Plan 4 預設 push=False)
+    if dry_run or not push:
         print("=" * 60)
+        if dry_run:
+            print(f"[dry-run] would push 1 header + {len(selected)} candidates")
+        else:
+            # Plan 4 預設路徑:明確告訴 user 為什麼不推
+            print(
+                f"[preview] Plan 4 disabled push. "
+                f"Would push 1 header + {len(selected)} candidates "
+                f"if --push were passed."
+            )
+        print()
         print("[header]")
         print(header)
         print()
@@ -735,9 +769,13 @@ def run_push(days: int = DEFAULT_DAYS, dry_run: bool = False) -> int:
             print(render_candidate(i, len(selected), rec, digest_date))
             print()
         print("=" * 60)
-        print(f"DRY-RUN: would push 1 header + {len(selected)} candidates")
+        if not push and not dry_run:
+            logger.info(
+                "push skipped (default). re-run with --push to actually push."
+            )
         return 0
 
+    # 實際推播(push=True)— Plan 3 行為
     # 推 header
     hdr_res = push_to_discord(header)
     if not hdr_res.get("ok"):
@@ -797,7 +835,20 @@ def run_test_pick(message_id: str, emoji: str) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dry-run", action="store_true", help="只 print,不推")
+    ap.add_argument(
+        "--push",
+        action="store_true",
+        help=(
+            "Plan 4 上線後預設 **不推**(防呆)。帶這個 flag 才真的推 "
+            "Discord + 寫 DailyDigestPicks。沒帶 → 只 print header + "
+            "candidates。"
+        ),
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只 print,不推(向後相容 Plan 3;跟 --push 互斥用途)",
+    )
     ap.add_argument(
         "--test-pick",
         nargs=2,
@@ -816,7 +867,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         msg_id, emoji = args.test_pick
         return run_test_pick(msg_id, emoji)
 
-    return run_push(days=args.days, dry_run=args.dry_run)
+    return run_push(days=args.days, push=args.push, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

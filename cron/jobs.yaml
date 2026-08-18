@@ -1,28 +1,40 @@
-# Cron Jobs (Plan 3 — Daily Digest)
-# =================================
-# 這是 placeholder schema,目前 ``enabled: false``,需 PM 蓋章後手動開。
+# Cron Jobs (Plan 4 — Passive Reaction Listener + Weekly Recap)
+# =============================================================
+# 2026-08-17 Plan 4 上線:從 Plan 3「主動推播候選」改為「被動接收 user ✅」。
+# Plan 3 的 ``digest_candidates_cest_0630`` 已 DEPRECATED(下方說明),
+# ``daily_digest.py`` main flow 加上 ``--push`` flag,預設 **不實際推**。
 #
 # 排程器說明
 # ----------
-# 1. ``digest_candidates_cest_0630``(每日 04:30 UTC = 06:30 CEST):
-#    從 Airtable ProcessedContent 拉昨日 24-48 小時的 record,排序 + quota
-#    篩選成候選清單,推 header + N 則候選到 Discord channel
-#    1539010288026779688,同步寫 DailyDigestPicks。
+# 1. ~~``digest_candidates_cest_0630``~~(每日 04:30 UTC = 06:30 CEST):
+#    **DEPRECATED 2026-08-17 Plan 4** — 從此改為被動:user 在
+#    ``#每日頭條`` / ``#每日podcast`` / ``#每日reddit`` 自行按 ✅,
+#    ``discord_picks.py`` daemon 接收並寫進新表 ``ReactionPicks``。
+#    Cron 仍保留 entry 但 ``enabled: false`` + DEPRECATED 註記,
+#    留作未來若 user 想回頭看歷史 plan 對照。
 #
-# 2. ``digest_recap_cest_tue_fri_0700``(週二/五 05:00 UTC = 07:00 CEST):
-#    推過去 5 天 DailyDigestPicks 中 ``picked=yes`` 的清單到 channel
-#    1537705289367953408(#長文推薦 / digest_recap 共用 channel)。
-#    ⚠️  --recap flag 目前 daily_digest.py 還沒實作(Plan 3 Part 2),
-#    開啟前要先補。Part 1 這輪先建 placeholder。
+# 2. ``weekly_recap_cest_tue_fri_0700``(週二/五 05:00 UTC = 07:00 CEST):
+#    從 ``ReactionPicks`` 拉過去 3 天 ``reaction_date >= now-3d`` 的清單,
+#    推 1 個 header + 每則獨立 message 到 channel
+#    1539010288026779688(#挑文區),問 user 怎麼處理每則 ✅。
+#    Plan 4 上線即啟用(``enabled: true``)。
 #
 # 配套 daemon
 # -----------
-# ``discord_picks.py`` 是**長跑 daemon**(非 cron 一次性)—
-# 訂閱 MESSAGE_REACTION_ADD,把 emoji 反應寫進 DailyDigestPicks。
-# 啟動方式見 ``pipeline/lib/discord_picks.py`` docstring(systemd 或
-# nohup)。**沒有它在線,cron 推的 digest 不會被「接收」→ labeled data
-# 不會累積**。所以開 cron 之前要先把 daemon 拉起來。
+# ``discord_picks.py`` 是**長跑 daemon**(非 cron 一次性)— Plan 4 改成
+# **被動接收 user ✅ reaction**:
+# - 訂閱 MESSAGE_REACTION_ADD,只 listen ``#每日頭條``(1520791894995501106)
+#   / ``#每日podcast``(1535461574460968960)/ ``#每日reddit``(1537907956132089976)
+#   三個 channel
+# - 只收 ✅ emoji
+# - 只收 ``DISCORD_ALLOWED_USERS`` 裡的 user
+# - 抓 message 完整內容,寫進 Airtable 新表 ``ReactionPicks``
+# - 沒有它在線,user 按 ✅ 沒人接,ReactionPicks 不會累積 → weekly_recap
+#   沒資料可推,所以開 weekly_recap cron 之前要先把 daemon 拉起來。
 #
+# 啟動方式見 ``pipeline/lib/discord_picks.py`` docstring(systemd 或
+# nohup)。
+
 # 時區說明
 # --------
 # - systemd / cron 本身只認 UTC(主機時鐘也是 UTC),所以排程用 UTC。
@@ -30,62 +42,75 @@
 # - 「看起來像 06:30 CEST」實際上是「04:30 UTC」(夏令)或「05:30 UTC」(冬令)。
 # - 本檔用夏令為基準排 04:30 UTC;冬令期間需手動暫停 + 改 schedule,
 #   或包一層 tz-aware wrapper(本期不做)。
-#
+
 # 開啟前檢查清單
 # --------------
 # 1. AIRTABLE_API_KEY 在 daemon / cron 環境都設好
 # 2. DISCORD_BOT_TOKEN(給 daemon)
-# 3. discord_picks.py daemon 已在 systemd / nohup 跑
-# 4. daily_digest.py --recap flag 實作(只影響第二條 job)
-# 5. 改 ``enabled: true``
+# 3. discord_picks.py daemon 已在 systemd / nohup 跑(Plan 4 被動模式)
+# 4. ReactionPicks 表已建立: setup_airtable_reaction_picks.py
+# 5. weekly_recap.py --dry-run 看過輸出格式沒問題
 
 version: 1
 timezone: UTC
 
 jobs:
   # -----------------------------------------------------------------
-  # Job 1: 每日 06:30 CEST 推候選清單
+  # Job 1: ~~每日 06:30 CEST 推候選清單~~ (DEPRECATED 2026-08-17 Plan 4)
   # -----------------------------------------------------------------
-  - name: digest_candidates_cest_0630
-    enabled: false  # PM 蓋章後手動開
+  # 這條 Plan 3 job 在 Plan 4 已經被取代:user 改為「自己逛 channel 時
+  # 順手按 ✅」,由 ``discord_picks.py`` 被動接收 + 寫進 ReactionPicks,
+  # 不再每日 06:30 主動推 15 候選到 #挑文區。
+  #
+  # 保留 entry 只是為了歷史紀錄 — 預設 disabled,Plan 4 不會跑它。
+  # 如果未來想回到 Plan 3 行為,只要把 ``enabled`` 翻成 true 即可。
+  # -----------------------------------------------------------------
+  - name: digest_candidates_cest_0630  # DEPRECATED 2026-08-17 Plan 4
+    enabled: false
     schedule: '30 4 * * *'  # 04:30 UTC = 06:30 CEST(夏令)
     script: pipeline/scripts/daily_digest.py
     args: []
     env:
       - AIRTABLE_API_KEY
     description: |
-      每日候選清單推送。從 Airtable ProcessedContent 拉過去 24-48 小時
-      的 record,排序(paywall_preview_kept DESC → processed_at DESC),
-      每個 source_type 最多 5 篇,推 header + N 則候選到 channel
-      1539010288026779688(digest_candidates)。
+      [DEPRECATED 2026-08-17 Plan 4] 每日候選清單推送。Plan 3 行為
+      已被「被動 reaction listener + weekly recap」取代:user 自己逛
+      channel 順手按 ✅,daemon 寫進 ReactionPicks,週二/五由
+      weekly_recap.py 推回顧到 #挑文區。
+      保留 entry 留作歷史紀錄,不會再跑(``enabled: false``)。
     deliver:
       discord_channel_id: '1539010288026779688'
       discord_alias: digest_candidates
     depends_on:
-      - discord_picks_daemon  # 必須在線,否則 emoji reaction 不會被接收
+      - discord_picks_daemon
     notes:
-      - "dry-run 確認格式: pipeline/scripts/daily_digest.py --dry-run"
+      - "Plan 4 上線後不會自動跑(``enabled: false``)。"
+      - "若要手動驗 Plan 3 行為,需帶 ``--push`` flag 才會真的推:"
+      - "  python3 pipeline/scripts/daily_digest.py --push"
       - "idempotent Airtable setup: pipeline/scripts/setup_airtable_daily_digest.py"
 
   # -----------------------------------------------------------------
-  # Job 2: 週二/五 07:00 CEST 推回顧
+  # Job 2: 週二/五 07:00 CEST 推週回顧(Plan 4 上線即啟用)
   # -----------------------------------------------------------------
-  - name: digest_recap_cest_tue_fri_0700
-    enabled: false  # PM 蓋章後手動開,且 --recap flag 還沒寫
+  - name: weekly_recap_cest_tue_fri_0700
+    enabled: true  # Plan 4 上線即開
     schedule: '0 5 * * 2,5'  # 05:00 UTC = 07:00 CEST(夏令),週二 + 週五
-    script: pipeline/scripts/daily_digest.py
-    args: ['--recap']
+    script: pipeline/scripts/weekly_recap.py
+    args: []
     env:
       - AIRTABLE_API_KEY
     description: |
-      週二/五回顧推送。從 DailyDigestPicks 撈過去 5 天
-      picked=yes 的清單,推到 channel 1537705289367953408
-      (同 longform channel;Plan 3 已加 digest_recap alias)。
+      週二/五回顧推送。從 Airtable ReactionPicks 拉過去 3 天
+      (預設 ``--days 3``,可覆寫)user 在 #每日頭條 / #每日podcast /
+      #每日reddit 按過 ✅ 的清單,推 1 則 header + 每則獨立 message
+      到 channel 1539010288026779688(#挑文區),問 user 怎麼處理每則
+      (寫長文 / Podcast 主題 / 其他 / 跳過)。
     deliver:
-      discord_channel_id: '1537705289367953408'
-      discord_alias: digest_recap
+      discord_channel_id: '1539010288026779688'
+      discord_alias: digest_candidates  # 共用同一個 channel
     depends_on:
-      - discord_picks_daemon
+      - discord_picks_daemon  # 必須在線寫 ReactionPicks,這條才有資料
     notes:
-      - "⚠️  --recap flag Plan 3 Part 2 才會實作,Part 1 先建 placeholder"
-      - "dry-run: pipeline/scripts/daily_digest.py --recap --dry-run(目前會 argparse 失敗)"
+      - "dry-run: python3 pipeline/scripts/weekly_recap.py --dry-run"
+      - "覆寫天數: python3 pipeline/scripts/weekly_recap.py --days 7"
+      - "idempotent Airtable setup: pipeline/scripts/setup_airtable_reaction_picks.py"
