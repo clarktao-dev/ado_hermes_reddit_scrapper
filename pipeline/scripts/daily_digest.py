@@ -108,6 +108,7 @@ _VAULT_URL_RE = re.compile(r"\*\*URL\*\*:\s*(https?://\S+)")
 # YAML frontmatter parser for YouTube transcripts:
 #   ``video_id: ...``, ``channel: ...``, ``fetched_at: ...``
 _YAML_FRONT_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+_DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # article_type → content_kind(Plan 3 DailyDigestPicks.content_kind 欄位)
 # ProcessedContent.article_type 是 short-summary / long-form / pending-long-form /
@@ -318,11 +319,17 @@ def _vault_reddit_fallback(days: int) -> List[Dict[str, Any]]:
 
 
 def _vault_youtube_fallback(days: int) -> List[Dict[str, Any]]:
-    """Scan ``vault/YouTube/<Channel>/_transcripts/*.md`` for the lookback window.
+    """Scan ``vault/YouTube/{date}/{channel}/*.md`` for the lookback window.
 
-    Pulls ``video_id``, ``channel`` from the YAML frontmatter. ``fetched_at``
-    is used to compute the "day" bucket. ``source_id`` is
-    ``vault:youtube:<video_id>``; ``url`` is the standard watch URL.
+    Plan 6 (2026-08-18): layout switched from
+    ``{Channel}/_transcripts/*.md`` to the Plan 5 3-level layout
+    ``{date}/{channel}/*.md``. Date is taken from the path
+    (authoritative) — ``fetched_at`` from frontmatter is kept as a
+    fallback for files where path is non-canonical.
+
+    Pulls ``video_id`` / ``channel`` / ``fetched_at`` from the YAML
+    frontmatter. ``source_id`` is ``vault:youtube:<video_id>``;
+    ``url`` is the standard watch URL.
     """
     from datetime import date, timedelta, datetime as _dt
 
@@ -334,78 +341,93 @@ def _vault_youtube_fallback(days: int) -> List[Dict[str, Any]]:
         return items
     today = date.today()
     cutoff = today - timedelta(days=days)
-    for channel_dir in sorted(base.iterdir()):
-        if not channel_dir.is_dir():
+    # Plan 5/6: 3-level layout {date}/{channel}/{file}.md
+    for date_dir in sorted(base.iterdir()):
+        if not date_dir.is_dir():
             continue
-        transcripts = channel_dir / "_transcripts"
-        if not transcripts.exists():
+        # Only consume date dirs that look like YYYY-MM-DD — leaves any
+        # stale top-level channel dir (e.g. "1aLAGE_Immobilienpodcast/")
+        # out of the scan instead of failing on it.
+        if not _DATE_DIR_RE.match(date_dir.name):
             continue
-        channel_name = channel_dir.name.replace("__", ".").replace("_", " ")
-        for f in sorted(transcripts.glob("*.md")):
-            try:
-                content = f.read_text(encoding="utf-8")
-            except OSError:
+        try:
+            dir_date = _dt.fromisoformat(date_dir.name).date()
+        except ValueError:
+            continue
+        if dir_date < cutoff:
+            continue
+        for channel_dir in sorted(date_dir.iterdir()):
+            if not channel_dir.is_dir():
                 continue
-            yfm = _YAML_FRONT_RE.match(content)
-            if not yfm:
-                continue
-            yaml_body = yfm.group(1)
-            video_id = ""
-            fetched_at = ""
-            for line in yaml_body.splitlines():
-                if line.startswith("video_id:"):
-                    video_id = line.split(":", 1)[1].strip()
-                elif line.startswith("fetched_at:"):
-                    fetched_at = line.split(":", 1)[1].strip()
-            if not video_id:
-                continue
-            # Day bucket: derive from fetched_at if available, else file mtime
-            day = ""
-            if fetched_at:
+            channel_name = channel_dir.name.replace("__", ".").replace("_", " ")
+            for f in sorted(channel_dir.glob("*.md")):
+                if f.name == "_index.md":
+                    continue
                 try:
-                    day = _dt.fromisoformat(fetched_at.replace("Z", "+00:00")).date().isoformat()
-                except ValueError:
-                    day = ""
-            if not day:
-                try:
-                    mtime = date.fromtimestamp(f.stat().st_mtime)
-                    day = mtime.isoformat()
+                    content = f.read_text(encoding="utf-8")
                 except OSError:
                     continue
-            if _dt.fromisoformat(day).date() < cutoff:
-                continue
-            url = f"https://www.youtube.com/watch?v={video_id}"
-            # First line of the body (after frontmatter) is the title — we
-            # do a best-effort pull by looking for the first markdown H1.
-            body = content[yfm.end():]
-            title = ""
-            for line in body.splitlines():
-                line = line.strip()
-                if line.startswith("# "):
-                    title = line[2:].strip()
-                    break
-            if not title:
-                title = video_id
-            source_id = f"vault:youtube:{video_id}"
-            items.append(
-                _synth_record(
-                    source_type="youtube",
-                    source_id=source_id,
-                    source_hash=make_hash("youtube", source_id),
-                    title=title,
-                    url=url,
-                    vault_path=str(f),
-                    channels=[f"youtube.{channel_dir.name}"],
-                    day=day,
-                    article_type="long-form",
-                    metadata={
-                        "channel": channel_name,
-                        "video_id": video_id,
-                        "url": url,
-                        "vault_only": True,
-                    },
+                yfm = _YAML_FRONT_RE.match(content)
+                if not yfm:
+                    continue
+                yaml_body = yfm.group(1)
+                video_id = ""
+                fetched_at = ""
+                for line in yaml_body.splitlines():
+                    if line.startswith("video_id:"):
+                        video_id = line.split(":", 1)[1].strip()
+                    elif line.startswith("fetched_at:"):
+                        fetched_at = line.split(":", 1)[1].strip()
+                if not video_id:
+                    continue
+                # Day bucket: prefer path-derived date (canonical);
+                # fall back to fetched_at from frontmatter.
+                day = date_dir.name
+                if not day and fetched_at:
+                    try:
+                        day = _dt.fromisoformat(fetched_at.replace("Z", "+00:00")).date().isoformat()
+                    except ValueError:
+                        day = ""
+                if not day:
+                    try:
+                        mtime = date.fromtimestamp(f.stat().st_mtime)
+                        day = mtime.isoformat()
+                    except OSError:
+                        continue
+                if _dt.fromisoformat(day).date() < cutoff:
+                    continue
+                url = f"https://www.youtube.com/watch?v={video_id}"
+                # First line of the body (after frontmatter) is the title — we
+                # do a best-effort pull by looking for the first markdown H1.
+                body = content[yfm.end():]
+                title = ""
+                for line in body.splitlines():
+                    line = line.strip()
+                    if line.startswith("# "):
+                        title = line[2:].strip()
+                        break
+                if not title:
+                    title = video_id
+                source_id = f"vault:youtube:{video_id}"
+                items.append(
+                    _synth_record(
+                        source_type="youtube",
+                        source_id=source_id,
+                        source_hash=make_hash("youtube", source_id),
+                        title=title,
+                        url=url,
+                        vault_path=str(f),
+                        channels=[f"youtube.{channel_dir.name}"],
+                        day=day,
+                        article_type="long-form",
+                        metadata={
+                            "channel": channel_name,
+                            "video_id": video_id,
+                            "url": url,
+                            "vault_only": True,
+                        },
+                    )
                 )
-            )
     return items
 
 
