@@ -1024,40 +1024,42 @@ def step_send_discord(items, cfg, dry_run):
     else:
         ok = False
 
-    # ---- Body embeds: split into chunks of items_per_embed ----
+    # ---- Body embeds: ONE message per item (Plan 8 — Plan 3 spec) ----
+    # Before Plan 8 the loop bundled items_per_embed (default 3) items into
+    # one embed, making ✅/❌/🟡 reactions useless (a single emoji could
+    # not be attributed to a single article). Now each item gets its own
+    # embed so ``discord_picks.py`` can record one ReactionPicks row per
+    # article. The header embed above is still sent for context but is not
+    # required for scoring.
     ok = True
-    body_index = 0
-    for start in range(0, len(items), items_per_embed):
-        body_index += 1
-        batch = items[start:start + items_per_embed]
-        body_lines = []
-        for j, it in enumerate(batch, 1):
-            global_i = start + j
-            title = it.get("title_zh") or it.get("title", "")
-            summary = it.get("summary_zh") or ""
-            if len(summary) > per_item_max:
-                summary = summary[:per_item_max] + "…(截斷)"
-            url = it.get("url", "")
-            src = it.get("source_name", "?")
-            body_lines.append(f"### {global_i}. {title}\n*來源：{src}*")
-            if summary:
-                body_lines.append(summary)
-            if url:
-                body_lines.append(f"🔗 {url}")
-            body_lines.append("")  # blank line between items
+    for i, it in enumerate(items, 1):
+        title = it.get("title_zh") or it.get("title", "")
+        summary = it.get("summary_zh") or ""
+        if len(summary) > per_item_max:
+            summary = summary[:per_item_max] + "…(截斷)"
+        url = it.get("url", "")
+        src = it.get("source_name", "?")
+        body_lines = [
+            f"### {i}. {title}",
+            f"*來源：{src}*",
+        ]
+        if summary:
+            body_lines.append(summary)
+        if url:
+            body_lines.append(f"🔗 {url}")
         body = "\n".join(body_lines)[:summary_max]
-        # Color gradient blue → green → teal by batch index.
-        color = 0x2ecc71 + (body_index * 0x050505)
+        # Color gradient blue → green → teal across items.
+        color = 0x2ecc71 + (i * 0x050505)
         try:
             resp = mod.send_to_channel(
                 channel_id,
                 body,
                 as_embed=True,
-                title=f"📖 第 {body_index} 場摘要",
+                title=f"📖 第 {i} 則",
                 color=color,
             )
         except Exception as exc:  # noqa: BLE001
-            print(f"  [discord] body embed #{body_index} raised: "
+            print(f"  [discord] body embed #{i} raised: "
                   f"{type(exc).__name__}: {exc}", flush=True)
             traceback.print_exc()
             resp = None
@@ -1067,10 +1069,7 @@ def step_send_discord(items, cfg, dry_run):
         elif isinstance(resp, str):
             msg_id = resp
         if msg_id:
-            # Attribute this embed to the first item in the batch (good-enough
-            # backref; the daily index already lists every title).
-            first_idx = start
-            result["per_item"].setdefault(first_idx, []).append(msg_id)
+            result["per_item"].setdefault(i - 1, []).append(msg_id)
         if not resp:
             ok = False
     result["ok"] = ok

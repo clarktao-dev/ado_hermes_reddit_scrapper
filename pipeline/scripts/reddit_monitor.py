@@ -312,28 +312,35 @@ def render_post_md(it: dict) -> str:
 
 
 def push_discord(per_sub_picks: dict[str, list[dict]], dry_run: bool) -> None:
-    """Push one Discord embed per subreddit with all picks + real URLs."""
+    """Push one Discord message per pick (Plan 8 — Plan 3 spec).
+
+    Before Plan 8 the loop bundled all picks for a subreddit into a single
+    message ("3-in-1"), which made emoji scoring useless — a ✅/❌/🟡
+    reaction on the bundle could not be attributed to a single article.
+    Now each pick gets its own message so ``discord_picks.py`` can record
+    one ``ReactionPicks`` row per article.
+    """
     for sub, picks in per_sub_picks.items():
         if not picks:
             continue
         # sub is "r/Immobilieninvestments"; display as "r/..." (no doubling).
         display_sub = sub if sub.startswith("r/") else f"r/{sub}"
-        lines = [f"# {display_sub} — Reddit 每日精選", ""]
-        for it in picks:
+        for i, it in enumerate(picks, 1):
             title = it.get("title_zh") or it.get("title", "")
             score = it.get("score", 0)
-            summary = it.get("summary_zh", "")
+            summary = it.get("summary_zh", "")[:500]
             url = it.get("url", "")
-            lines.append(f"## [{score:>2}] {title}")
-            lines.append(f"<{url}>")
-            lines.append(summary[:500])
-            lines.append("")
-        text = "\n".join(lines)
-        if dry_run:
-            print(f"[discord dry-run] {sub}: {len(text)} chars")
-            continue
-        _send(channel=DISCORD_CHANNEL_REDDIT, content=text[:1900])  # 1900 safe cap
-        time.sleep(1)
+            text = (
+                f"# {display_sub} — Reddit 每日精選\n"
+                f"## [{score:>2}] {title}\n"
+                f"<{url}>\n\n"
+                f"{summary}"
+            )
+            if dry_run:
+                print(f"[discord dry-run] {sub} #{i}: {len(text)} chars")
+                continue
+            _send(channel=DISCORD_CHANNEL_REDDIT, content=text[:1900])
+            time.sleep(1)
 
 
 def _build_reddit_metadata(item: dict, today: str) -> dict:
