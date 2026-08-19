@@ -35,6 +35,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -180,7 +181,15 @@ def filter_processed(
 # --------------------------------------------------------------------------- #
 
 def _step(name, fn):
-    """Run one step with timing + error capture. Returns the result or None."""
+    """Run one step with timing + error capture. Returns the result or None.
+
+    Plan 7 (2026-08-19): the previous version only printed the exception
+    message, hiding the stack trace. Real bugs (e.g. discord send raising
+    HTTPError, or subprocess failing non-zero) were silently logged as
+    "[OK]" because the outer swallow swallowed the actual cause. Now we
+    ``traceback.print_exc()`` so the cron log shows exactly which line
+    failed.
+    """
     print(f"\n=== STEP: {name} ===", flush=True)
     t0 = time.time()
     try:
@@ -191,7 +200,9 @@ def _step(name, fn):
         return result
     except Exception as e:
         elapsed = time.time() - t0
-        print(f"[ERROR] {name} failed after {elapsed:.2f}s: {type(e).__name__}: {e}", flush=True)
+        print(f"[ERROR] {name} failed after {elapsed:.2f}s: {type(e).__name__}: {e}",
+              flush=True)
+        traceback.print_exc()
         return None
 
 
@@ -990,9 +1001,15 @@ def step_send_discord(items, cfg, dry_run):
         src = it.get("source_name", "?")
         header_lines.append(f"{i}. [{src}] {title}")
     header_body = "\n".join(header_lines)[:3800]
-    header_resp = mod.send_to_channel(channel_id, header_body, as_embed=True,
-                                      title="📰 德國房地產每日頭條",
-                                      color=0x3498db)
+    try:
+        header_resp = mod.send_to_channel(channel_id, header_body, as_embed=True,
+                                          title="📰 德國房地產每日頭條",
+                                          color=0x3498db)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [discord] header embed raised: {type(exc).__name__}: {exc}",
+              flush=True)
+        traceback.print_exc()
+        header_resp = None
     header_msg_id = None
     if isinstance(header_resp, dict):
         header_msg_id = header_resp.get("id")
@@ -1004,6 +1021,8 @@ def step_send_discord(items, cfg, dry_run):
             result["per_item"][0].append(header_msg_id)
         else:
             result["per_item"][0] = [header_msg_id]
+    else:
+        ok = False
 
     # ---- Body embeds: split into chunks of items_per_embed ----
     ok = True
@@ -1029,13 +1048,19 @@ def step_send_discord(items, cfg, dry_run):
         body = "\n".join(body_lines)[:summary_max]
         # Color gradient blue → green → teal by batch index.
         color = 0x2ecc71 + (body_index * 0x050505)
-        resp = mod.send_to_channel(
-            channel_id,
-            body,
-            as_embed=True,
-            title=f"📖 第 {body_index} 場摘要",
-            color=color,
-        )
+        try:
+            resp = mod.send_to_channel(
+                channel_id,
+                body,
+                as_embed=True,
+                title=f"📖 第 {body_index} 場摘要",
+                color=color,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [discord] body embed #{body_index} raised: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            traceback.print_exc()
+            resp = None
         msg_id = None
         if isinstance(resp, dict):
             msg_id = resp.get("id")
@@ -1053,7 +1078,16 @@ def step_send_discord(items, cfg, dry_run):
 
 
 def step_push_github(dry_run):
-    """Run push_to_github.py from the project root.
+    """Stage + commit + push immobilien-kb/ to GitHub.
+
+    Plan 7 (2026-08-19): the previous version just shell-out to
+    ``push_to_github.py``, which pushes the *current* HEAD via dulwich /
+    paramiko. If the working tree has untracked vault files (Reddit/*,
+    YouTube/*, Daily/*) and nobody ran ``git add`` + ``git commit`` first,
+    the push is a silent no-op — local HEAD == remote HEAD, the pack has
+    no new objects, and ``[OK] 9. push_to_github`` is logged while
+    nothing actually leaves the box. Mirror ``youtube_daily.py:319-323``
+    and do the add + commit here before delegating the wire push.
 
     Returns ``{"pushed": bool, "commit_sha": str|None}`` so
     :func:`step_update_side_effects` can backfill the ledger with the
@@ -1061,10 +1095,35 @@ def step_push_github(dry_run):
     """
     out: dict = {"pushed": False, "commit_sha": None}
     if dry_run:
-        print("  [dry-run] would run push_to_github.py")
+        print("  [dry-run] would git add + commit + push immobilien-kb/")
         return out
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    msg = f"news-kb: {today} daily digest"
+
+    cmds = [
+        ["git", "-C", _PROJECT_DIR, "add", "immobilien-kb/"],
+        ["git", "-C", _PROJECT_DIR, "-c", "user.email=ado@hermes.local",
+         "-c", "user.name=Ado", "commit", "-m", msg],
+    ]
+    for cmd in cmds:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if proc.returncode != 0:
+            # "nothing to commit" is fine — vault already committed earlier today.
+            if "nothing to commit" in proc.stderr or "nothing to commit" in proc.stdout:
+                print(f"  [git] {' '.join(cmd[:4])}: nothing to commit (ok)")
+                continue
+            print(f"  [git] {' '.join(cmd[:4])} FAILED rc={proc.returncode}")
+            print(f"  [git] stderr: {proc.stderr.strip()[-300:]}")
+            return out
+
+    # Now the paramiko push (bypasses @-mangle on the Discord-side SSH).
     print(f"  exec: python3 {_PUSH_TO_GITHUB}")
-    res = subprocess.run([sys.executable, _PUSH_TO_GITHUB], cwd=_PROJECT_DIR)
+    res = subprocess.run([sys.executable, _PUSH_TO_GITHUB], cwd=_PROJECT_DIR,
+                         capture_output=True, text=True, timeout=120)
+    if res.stdout:
+        print(f"  [push-to-github stdout] {res.stdout.strip()[-300:]}")
+    if res.stderr:
+        print(f"  [push-to-github stderr] {res.stderr.strip()[-300:]}")
     out["pushed"] = res.returncode == 0
     if out["pushed"]:
         sha_proc = subprocess.run(
