@@ -79,6 +79,21 @@ _KIND_TOKEN = {
 }
 
 
+# Plan 1 / Plan 10 (2026-08-19): the wipe logic in
+# ``news_daily.step_write_vault`` uses this map to glob ``*{suffix}.md``
+# files under ``vault/Daily/<date>/``. Each token is the Plan-5
+# ``_KIND_TOKEN`` value prefixed with ``_`` so the glob does not match
+# the date prefix in the filename (e.g. ``2026-08-19_hbl_longform_*.md``).
+# Adding a new ``_KIND_TOKEN`` value requires adding a matching suffix
+# here.
+_CONTENT_KIND_SUFFIX = {
+    "longform":              "_longform",
+    "short-summary":         "_summary",
+    "paywall-preview":       "_paywallpreview",
+    "short-paywall-preview": "_shortpaywallpreview",
+}
+
+
 def _check_traditional(item, strict=True):
     """DEPRECATED — superseded by _validate_against_system_prompt below which
     runs the full SYSTEM-prompt rule set (including simplified Chinese)."""

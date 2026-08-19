@@ -888,7 +888,8 @@ def filter_by_relevance(items, min_score=5):
     return out
 
 
-def step_write_vault(items, cfg, content_kind: str = "longform"):
+def step_write_vault(items, cfg, content_kind: str = "longform",
+                     strict_traditional: bool = True):
     """Write each item as a markdown file + the daily index file.
 
     Wipes the existing daily folder BEFORE writing so re-runs don't
@@ -943,9 +944,13 @@ def step_write_vault(items, cfg, content_kind: str = "longform"):
         wiped = True
     item_paths: dict[int, str] = {}
     for i, it in enumerate(items):
-        # Per-item content_kind takes precedence (Plan 1), else global.
+        # normalize deprecated content_kind values (Plan 1 era). Plan 5 dropped
+        # "full-article" — treat it as "longform" so legacy items still write.
         item_kind = it.get("content_kind") or content_kind
+        if item_kind == "full-article":
+            item_kind = "longform"
         path = obsidian.write_news_item(it, vault_root, date_str,
+                                        strict_traditional=strict_traditional,
                                         content_kind=item_kind)
         item_paths[i] = path
     # Index file is shared across all modes in the same daily folder —

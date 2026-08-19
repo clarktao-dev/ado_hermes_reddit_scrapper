@@ -1,0 +1,34 @@
+---
+type: news
+source: Google News (Immobilien)
+source_id: google_news_immobilien
+src_short: gn
+url: https://news.google.com/rss/articles/CBMiqAFBVV95cUxQR3ExTnRnWnFTTnQwZEMwTWpTOUxJWFlBWk1uOHppU1lDY1Y0UmdzOURQVU1EOHJlNzhDUEJrMVRBRm1QZTF3Z1c1eVhHNTY1VmVrRFFWT19MVjduaEMtUUw1OG1IUWhINTZobVB4SlZ1endfaFpmUmQ3ZDJnTjVoU0luSXE2UkFDRElLWmxkbDBCZExoRWFkdjVCWUxpYXZLTkVhRWNLd0nSAagBQVVfeXFMUEdxMU50Z1pxU050MGRDME1qUzlMSVhZQVpNbjh6aVNZQ2NWNFJnczlEUFVNRDhyZTc4Q1BCazFUQUZtUGUxd2dXNXlYRzU2NVZla0RRVk9fTFY3bmhDLVFMNThtSFFoSDU2aG1QeEpWdXp3X2haZlJkN2QyZ041aFNJbklxNlJBQ0RJS1psZGwwQmRMaEVhZHY1QllMaWF2S05FYUVjS3dJ?oc=5
+date: 2026-08-19
+fetched: 2026-08-19
+title_de: "W&amp;W plant deutliche Einschnitte - Baufinanzierung im Fokus - boerse.de - boerse.de"
+title_zh: ""
+content_kind: short-summary
+kind_token: summary
+tags: []
+priority: 7
+relevance_rank: 0
+---
+
+# W&amp;W plant deutliche Einschnitte - Baufinanzierung im Fokus - boerse.de - boerse.de
+
+## 摘要
+
+
+
+## 德文原文摘要
+
+> &lt;a href="https://news.google.com/rss/articles/CBMiqAFBVV95cUxQR3ExTnRnWnFTTnQwZEMwTWpTOUxJWFlBWk1uOHppU1lDY1Y0UmdzOURQVU1EOHJlNzhDUEJrMVRBRm1QZTF3Z1c1eVhHNTY1VmVrRFFWT19MVjduaEMtUUw1OG1IUWhINTZobVB4SlZ1endfaFpmUmQ3ZDJnTjVoU0luSXE2UkFDRElLWmxkbDBCZExoRWFkdjVCWUxpYXZLTkVhRWNLd0nSAagBQVVfeXFMUEdxMU50Z1pxU050MGRDME1qUzlMSVhZQVpNbjh6aVNZQ2NWNFJnczlEUFVNRDhyZTc4Q1BCazFUQUZtUGUxd2dXNXlYRzU2NVZla0RRVk9fTFY3bmhDLVFMNThtSFFoSDU2aG1QeEpWdXp3X2haZlJkN2QyZ041aFNJbklxNlJBQ0RJS1psZGwwQmRMaEVhZHY1QllMaWF2S05
+
+## 關鍵實體
+
+_（無顯著實體）_
+
+## 原文連結
+
+https://news.google.com/rss/articles/CBMiqAFBVV95cUxQR3ExTnRnWnFTTnQwZEMwTWpTOUxJWFlBWk1uOHppU1lDY1Y0UmdzOURQVU1EOHJlNzhDUEJrMVRBRm1QZTF3Z1c1eVhHNTY1VmVrRFFWT19MVjduaEMtUUw1OG1IUWhINTZobVB4SlZ1endfaFpmUmQ3ZDJnTjVoU0luSXE2UkFDRElLWmxkbDBCZExoRWFkdjVCWUxpYXZLTkVhRWNLd0nSAagBQVVfeXFMUEdxMU50Z1pxU050MGRDME1qUzlMSVhZQVpNbjh6aVNZQ2NWNFJnczlEUFVNRDhyZTc4Q1BCazFUQUZtUGUxd2dXNXlYRzU2NVZla0RRVk9fTFY3bmhDLVFMNThtSFFoSDU2aG1QeEpWdXp3X2haZlJkN2QyZ041aFNJbklxNlJBQ0RJS1psZGwwQmRMaEVhZHY1QllMaWF2S05FYUVjS3dJ?oc=5

@@ -1,0 +1,34 @@
+---
+type: news
+source: Google News (Immobilien)
+source_id: google_news_immobilien
+src_short: gn
+url: https://news.google.com/rss/articles/CBMiowFBVV95cUxNU3Vob1RMVmpmQmM1RmdVTkdMMUE5R3ZlY3FLNVdsa2RLWUJyS1FZSjV6aEFJRFZxcnNIXzhWNGFYSVZFTlMwZFMtUEtFM3ZWTzNobllKRmxjeEZvbTZiUUtlRGx6Vk1Wcmc2QmlYU2ZpOGVBNGdrSW51OXg3MDJjcmFseHoxVHM3VzJIcWg0OFdxTDhPSFFzRVZwSTdlWm1Xa2lR0gGjAUFVX3lxTE1TdWhvVExWamZCYzVGZ1VOR0wxQTlHdmVjcUs1V2xrZEtZQnJLUVlKNXpoQUlEVnFyc0hfOFY0YVhJVkVOUzBkUy1QS0UzdlZPM2huWUpGbGN4Rm9tNmJRS2VEbHpWTVZyZzZCaVhTZmk4ZUE0Z2tJbnU5eDcwMmNyYWx4ejFUczdXMkhxaDQ4V3FMOE9IUXNFVnBJN2VabVdraVE?oc=5
+date: 2026-08-19
+fetched: 2026-08-19
+title_de: "Berenberg belässt TAG Immobilien auf 'Buy' - Ziel 20 Euro - boerse.de - boerse.de"
+title_zh: ""
+content_kind: short-summary
+kind_token: summary
+tags: []
+priority: 7
+relevance_rank: 0
+---
+
+# Berenberg belässt TAG Immobilien auf 'Buy' - Ziel 20 Euro - boerse.de - boerse.de
+
+## 摘要
+
+
+
+## 德文原文摘要
+
+> &lt;a href="https://news.google.com/rss/articles/CBMiowFBVV95cUxNU3Vob1RMVmpmQmM1RmdVTkdMMUE5R3ZlY3FLNVdsa2RLWUJyS1FZSjV6aEFJRFZxcnNIXzhWNGFYSVZFTlMwZFMtUEtFM3ZWTzNobllKRmxjeEZvbTZiUUtlRGx6Vk1Wcmc2QmlYU2ZpOGVBNGdrSW51OXg3MDJjcmFseHoxVHM3VzJIcWg0OFdxTDhPSFFzRVZwSTdlWm1Xa2lR0gGjAUFVX3lxTE1TdWhvVExWamZCYzVGZ1VOR0wxQTlHdmVjcUs1V2xrZEtZQnJLUVlKNXpoQUlEVnFyc0hfOFY0YVhJVkVOUzBkUy1QS0UzdlZPM2huWUpGbGN4Rm9tNmJRS2VEbHpWTVZyZzZCaVhTZmk4ZUE0Z2tJbnU5eDcwMmNyYWx4ejFUczdXMkhxaDQ4V3FMOE9IUXNFVnBJN2VabVdraVE?oc=
+
+## 關鍵實體
+
+_（無顯著實體）_
+
+## 原文連結
+
+https://news.google.com/rss/articles/CBMiowFBVV95cUxNU3Vob1RMVmpmQmM1RmdVTkdMMUE5R3ZlY3FLNVdsa2RLWUJyS1FZSjV6aEFJRFZxcnNIXzhWNGFYSVZFTlMwZFMtUEtFM3ZWTzNobllKRmxjeEZvbTZiUUtlRGx6Vk1Wcmc2QmlYU2ZpOGVBNGdrSW51OXg3MDJjcmFseHoxVHM3VzJIcWg0OFdxTDhPSFFzRVZwSTdlWm1Xa2lR0gGjAUFVX3lxTE1TdWhvVExWamZCYzVGZ1VOR0wxQTlHdmVjcUs1V2xrZEtZQnJLUVlKNXpoQUlEVnFyc0hfOFY0YVhJVkVOUzBkUy1QS0UzdlZPM2huWUpGbGN4Rm9tNmJRS2VEbHpWTVZyZzZCaVhTZmk4ZUE0Z2tJbnU5eDcwMmNyYWx4ejFUczdXMkhxaDQ4V3FMOE9IUXNFVnBJN2VabVdraVE?oc=5
