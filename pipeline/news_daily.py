@@ -1069,13 +1069,22 @@ def step_send_discord(items, cfg, dry_run):
             traceback.print_exc()
             resp = None
         msg_id = None
+        # Plan 12f (2026-08-21): discord_sender.send_to_channel returns
+        # `{"ok": bool, "message_ids": [...], "error": str|None}`,
+        # NOT `{"id": ...}`. Previous code looked up wrong field, so
+        # msg_id was always None and per_item ledger was silently empty,
+        # causing Airtable discord=False. Use the correct field.
         if isinstance(resp, dict):
-            msg_id = resp.get("id")
+            if resp.get("ok") and resp.get("message_ids"):
+                msg_id = resp["message_ids"][0]
+            elif not resp.get("ok"):
+                print(f"  [discord] body embed #{i} send failed: "
+                      f"{resp.get('error')!r}", flush=True)
         elif isinstance(resp, str):
             msg_id = resp
         if msg_id:
             result["per_item"].setdefault(i - 1, []).append(msg_id)
-        if not resp:
+        if not resp or not msg_id:
             ok = False
     result["ok"] = ok
     return result
