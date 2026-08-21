@@ -65,6 +65,7 @@ SUBREDDITS = [
     "Finanzen",
     "Immoscoutwildgeworden",
     "wohnen",
+    "Hausbau",  # 2026-08-21: 新增,蓋房/自建流程主題;與 r/Immoscoutwildgeworden(荒謬物件)互補
 ]
 
 # Plan 5 (2026-08-18): subreddit plain name → short code used in the new
@@ -75,6 +76,7 @@ SUBREDDIT_SHORT = {
     "finanzen": "r-finanzen",
     "immoscoutwildgeworden": "r-immoscout",
     "wohnen": "r-wohnen",
+    "hausbau": "r-hausbau",
 }
 
 
