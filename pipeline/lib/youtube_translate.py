@@ -43,6 +43,19 @@ except Exception:  # pragma: no cover
 
 CHUNK_SIZE = 4500  # chars per Google Translate call (their soft limit ~5000)
 
+# Google Translate's "soft fail" string — they return this as a plain string
+# (not an exception) when content hits a moderation / unmappable-text filter.
+# Must be treated as a hard failure so we fall back to LLM translation.
+_GT_SOFT_FAIL_PREFIXES = (
+    "no translation was found",
+    "please try a different",
+    "my translation memory is",
+)
+
+# ollama model used as fallback translator when Google refuses. Matches the
+# model we picked in reddit-safe commit f37d57f (hang-resistant on ollama-cloud).
+_LLM_FALLBACK_MODEL = os.environ.get("YT_LLM_FALLBACK_MODEL", "gpt-oss:120b")
+
 
 @dataclass
 class VideoDigest:
@@ -86,22 +99,93 @@ def _split_chunks(text: str, size: int = CHUNK_SIZE) -> List[str]:
     return [c for c in chunks if c]
 
 
+def _is_soft_fail(text: str) -> bool:
+    """Detect Google Translate's 'soft fail' string response.
+
+    Google returns a plain English sentence like "No translation was found
+    using the current translator. Try another translator?" as a regular
+    string when content hits a moderation / unmappable-text filter.
+    Treating this as success lets bad data flow downstream.
+    """
+    if not text:
+        return True
+    low = text.strip().lower()
+    return any(low.startswith(p) for p in _GT_SOFT_FAIL_PREFIXES)
+
+
+def _translate_chunk_via_ollama(chunk: str, source: str, target: str,
+                                timeout: int = 60) -> str:
+    """Last-resort translation via ollama LLM (gpt-oss:120b default)."""
+    if call is None:
+        raise RuntimeError(
+            "ollama LLM client (reddit_safe.pipeline.llm_client.call) "
+            "unavailable; cannot fall back from Google Translate"
+        )
+    lang_name = {"de": "German", "en": "English", "auto": "auto-detect"}.get(
+        source, source)
+    target_name = {"zh-TW": "Traditional Chinese (Taiwan)",
+                   "zh-CN": "Simplified Chinese", "en": "English"}.get(
+        target, target)
+    sys_prompt = (
+        f"You are a professional translator. Translate the user's text from "
+        f"{lang_name} into {target_name}. Preserve all numbers, names, and "
+        f"proper nouns. Output ONLY the translation, no preamble, no notes."
+    )
+    user_prompt = chunk
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    text, _usage = call(messages, timeout=timeout)
+    text = (text or "").strip()
+    if not text or _is_soft_fail(text):
+        raise RuntimeError(
+            f"ollama LLM fallback also returned empty/soft-fail for chunk "
+            f"({len(chunk)} chars)"
+        )
+    return text
+
+
 def _translate_chunk(chunk: str, source: str = "de", target: str = "zh-TW",
                      retries: int = 2) -> str:
-    """Translate one chunk via Google Translate, with retry."""
+    """Translate one chunk via Google Translate, with two-stage fallback.
+
+    Order:
+      1. Google Translate with explicit source language (retry on transient
+         network errors and on hard exceptions like TranslationNotFound).
+      2. Google Translate with source='auto' (sometimes Google rejects DE-
+         tagged input even though it can translate the same text under auto).
+      3. ollama LLM direct translation (last resort).
+    """
     last_err: Optional[Exception] = None
     for attempt in range(retries + 1):
         try:
-            return GoogleTranslator(source=source, target=target).translate(chunk)
+            r = GoogleTranslator(source=source, target=target).translate(chunk)
+            if not _is_soft_fail(r):
+                return r
+            last_err = RuntimeError(f"Google soft-fail: {r[:120]!r}")
         except (NotValidPayload, TranslationNotFound) as e:
             last_err = e
-            continue
         except Exception as e:  # network errors
             last_err = e
             if attempt < retries:
                 time.sleep(2.0)
-            continue
-    raise RuntimeError(f"Google Translate failed after {retries + 1} attempts: {last_err}")
+
+    # Fallback 1: let Google auto-detect source language
+    if source != "auto":
+        try:
+            r = GoogleTranslator(source="auto", target=target).translate(chunk)
+            if not _is_soft_fail(r):
+                print(f"    [translate] Google auto-detect fallback worked")
+                return r
+            last_err = RuntimeError(f"Google auto soft-fail: {r[:120]!r}")
+        except Exception as e:
+            last_err = e
+
+    # Fallback 2: ollama LLM
+    print(f"    [translate] Google failed on chunk ({len(chunk)} chars), "
+          f"falling back to {_LLM_FALLBACK_MODEL}: {last_err}")
+    return _translate_chunk_via_ollama(chunk, source, target)
 
 
 STRUCTURE_SYSTEM_PROMPT = """你是一位專精於德國房地產的資深編輯助理，幫台灣投資人整理 YouTube 影片的繁體中文深度整理。
