@@ -125,12 +125,50 @@ def _state_json_has(state: youtube_state.StateStore, channel_id: str,
     (Airtable) is the single source of truth. But existing state.json
     records are still respected so we don't reprocess them before they
     migrate into Airtable.
+
+    **Trust guard (2026-08-24)**: a state.json record is ONLY trusted when the
+    vault has physical evidence the digest was actually written. Earlier runs
+    (Task 3) would sometimes record ``processed_ids`` for videos whose digest
+    failed silently (e.g. empty transcript + no fallback). Result: those
+    videos were stuck in a "processed but never summarized" zombie state —
+    pipeline always skipped them even though they were new material. The vault
+    cross-check restores them as eligible candidates.
     """
     try:
-        return state.is_processed(channel_id, video_id)
+        if not state.is_processed(channel_id, video_id):
+            return False
+        # state.json says processed → verify vault has a matching file.
+        return _vault_has_digest(channel_id, video_id)
     except Exception as e:  # noqa: BLE001
         logger.debug("state.json read failed (%s) — ignoring", e)
         return False
+
+
+def _vault_has_digest(channel_id: str, video_id: str) -> bool:
+    """Best-effort check: does the vault have a digest file mentioning this
+    video_id? Search the Daily/<date>/ folders for a filename containing the
+    video id. Cheap (one glob per check), only runs when state.json has the
+    id marked.
+
+    Note: this only checks historical Daily/ folders. Long-form vault files
+    under immobilien-kb/vault/YouTube/<Channel>/ also count (written by
+    recommend_long_form confirm).
+    """
+    repo = Path(__file__).parent.parent  # /root/projects/ado_hermes_reddit_scrapper
+    # 1. podcast-kb/vault/Daily/*/<slug>*<video_id>*.md
+    daily_glob = list((repo / "podcast-kb" / "vault" / "Daily").glob(
+        f"*/*/*{video_id}*.md"))
+    if daily_glob:
+        return True
+    # 2. immobilien-kb/vault/YouTube/<Channel>/ long-form (rare path)
+    yt_dir = repo / "immobilien-kb" / "vault" / "YouTube"
+    if yt_dir.exists():
+        for ch_dir in yt_dir.iterdir():
+            if not ch_dir.is_dir():
+                continue
+            if list(ch_dir.glob(f"**/*{video_id}*.md")):
+                return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -567,7 +605,9 @@ def main() -> int:
                 v = forced_video
                 logger.info("using forced video: %s", v.id)
         elif store is not None:
-            candidates = pick_video_for_channel(ch, store=store, state=state)
+            candidates = pick_video_for_channel(
+                ch, store=store, state=state, look_back=30,
+            )
             if candidates:
                 v = candidates[0]
         else:
