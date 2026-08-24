@@ -100,11 +100,18 @@ def _write_run_counter(n: int) -> None:
     Path(RUN_COUNTER_PATH).write_text(str(n))
 
 
-def pick_channels(channels: list, n: int = 3) -> list:
+def pick_channels(channels: list, n: int = 4) -> list:
     """Round-robin by run count: pick n consecutive channels starting at
     (run_count % len(channels)). This rotates every time the pipeline runs
     (not just every day), so running twice in the same day hits different
     channels than the first run.
+
+    n default was 3 (2026-08-08); bumped to 4 on 2026-08-24 because ex_makler
+    has 22 zombie/unprocessed videos (state.json false positives — see
+    commit 4da1c72) and 3-channel cadence would take 6+ days to clear one
+    channel. 4-channel cadence brings total wall-clock to ~7 min vs ~5 min
+    at n=3, well within ollama-cloud's hang threshold (<8 sequential LLM
+    calls in tight loop).
 
     The run counter is incremented and persisted after each call so the
     next run starts from a different offset.
@@ -616,7 +623,7 @@ def main() -> int:
                 candidates = [legacy_v]
                 v = legacy_v
         if v is None:
-            print(f"  [skip] no unprocessed video found in latest {10}")
+            print(f"  [skip] no unprocessed video found in latest 30")
             continue
         # Try the chosen video first; if transcript is empty, walk to next.
         idx = 0
