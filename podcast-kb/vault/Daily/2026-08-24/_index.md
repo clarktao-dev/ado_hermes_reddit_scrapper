@@ -4,4 +4,4 @@
 
 | 頻道 | 標題 | 摘要 |
 | --- | --- | --- |
-| Immocation | [How an investor with hundreds of apartments uses AI (real-world examples from Basti)](https://www.youtube.com/watch?v=4sRSr6OlSZY) | Basti 透過 AI 自動掃描、命名與分類房產檔案，結合自訂 ChatGPT 提示與「交通燈」優先系統，打造完整資料庫與自動化流程，讓他管理數百套德國公寓的效 |
+| Der Ex-Makler | [Eigentumswohnung: Wenn die Gemeinschaft zur Hölle wird](https://www.youtube.com/watch?v=pKAUkc5BsmA) | 影片說明在德國購買公寓（Eigentumswohnung）時，業主協會的決策與住戶變動可能帶來衝突與限制，提醒投資人事先了解社群結構、投票權與管理規則，以免未來 |
