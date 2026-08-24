@@ -507,8 +507,8 @@ def main() -> int:
                          "``<slug>_summary.md`` / ``<slug>_longform.md``.")
     ap.add_argument("--channels", default="",
                     help="Comma-separated channel IDs to override round-robin (e.g. '1alage,marktcheck')")
-    ap.add_argument("--n-channels", type=int, default=3,
-                    help="How many channels to process (default 3 — covers 8 channels in ~16-20 days)")
+    ap.add_argument("--n-channels", type=int, default=4,
+                    help="How many channels to process per run (default 4 — covers 9 channels in ~10-12 days; bumped from 3 on 2026-08-24 to clear ex_makler zombie backlog from state.json false positives)")
     ap.add_argument("--skip-store", action="store_true",
                     help="Bypass ProcessedStore (for local debugging)")
     ap.add_argument("--pipeline-run-id", default="",
