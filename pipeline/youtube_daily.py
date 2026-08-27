@@ -206,6 +206,23 @@ SHORT_STRUCTURE_SYSTEM_PROMPT = """你是專精於德國房地產的資深編輯
 - 數字、人名、公司名稱忠於原文
 - 使用台灣在地表達
 - **嚴格控制長度**:一句話 ≤200 字、bullets 3-5 個、觀點 1-2 句、詞彙 3-5 個。**不要展開分析、不要寫長段落** — 這是 daily 預設的輕量版,完整分析請走 ``--mode long``。
+
+## ⛔ 反 hallucination 強制規則(2026-08-27 修補)
+
+你**絕對禁止**寫出以下任何 placeholder/錯誤訊息字串,即使聽起來「自然」、「合理」也不行:
+
+- `影片因伺服器錯誤無法載入` / `影片內容無法取得` / `無法取得影片內容`
+- `影片無法觀看` / `影片無法載入` / `影片已下架`
+- `伺服器錯誤` / `Server Error` / `Error 500`
+- `placeholder` / `字幕檔無法讀取`
+- 任何以「影片...無法...」開頭的句子
+
+**判斷邏輯**:
+- 若輸入的「逐字稿」有任何實質內容(德文對話/敘述/數字/人物/案例),你**必須根據內容寫摘要**,從影片主題直接切入,**不要**寫「無法取得」「伺服器錯誤」這類 placeholder。
+- **只有**當輸入逐字稿是**空字串、只有空白、或內容僅由 HTML/錯誤訊息組成**時,你才能在「一句話摘要」寫:`影片內容無法取得,請手動確認。`(這是唯一的合法 fallback 寫法,且**僅限**空逐字稿情境)
+- 「一句話摘要」的**開頭**必須直接是影片主題或結論,絕對不能以「影片...」開頭。
+
+**Pipeline 已加守門員**:即便你違反規則輸出 placeholder,後處理也會自動 re-prompt 或降級為 `(內容待補)`。請直接遵守,不要測試 pipeline 的容錯。
 """
 
 SHORT_STRUCTURE_USER_TEMPLATE = """以下是 YouTube 影片逐字稿的繁體中文機器翻譯結果。請做輕量版摘要。
@@ -234,6 +251,15 @@ def step_structure_short(video, translated_text: str,
     ``analyst_zh`` = bullets, ``producer_zh`` = 觀點; ``vocab_zh`` stays
     empty because vocabulary is a long-form affordance).
 
+    Anti-stub guard (2026-08-27):
+        If the LLM returns a stub summary ("影片因伺服器錯誤無法載入",
+        etc.) but the translated text actually contains content, retry ONCE
+        with a stricter user message that explicitly cites the input length
+        and forbids placeholder output. If the second attempt still looks
+        like a stub, downgrade to ``(內容待補)` placeholders so the vault
+        file is still produced (per the pipeline contract) but the user
+        can tell from Discord / vault that the digest needs manual review.
+
     Failure path: any LLM error → return empty strings so the caller can
     still write a vault file with `(無)` placeholders. We do not raise —
     the video is already transcribed and translated at this point; losing
@@ -247,15 +273,8 @@ def step_structure_short(video, translated_text: str,
         duration=duration_str,
         translated_text=translated_text,
     )
-    try:
-        from reddit_safe.pipeline.llm_client import call  # type: ignore
-        messages = [
-            {"role": "system", "content": SHORT_STRUCTURE_SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-        ]
-        text, _usage = call(messages, timeout=llm_timeout)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("step_structure_short: LLM call failed: %s", e)
+    text = _call_llm_short(user, llm_timeout=llm_timeout)
+    if text is None:
         return {"summary_zh": "", "analyst_zh": "", "producer_zh": "", "vocab_zh": ""}
     text = text.strip()
     # OpenCC belt-and-braces
@@ -266,7 +285,85 @@ def step_structure_short(video, translated_text: str,
     if has_simplified(text):
         fixed = force_traditional(text)
         text = fixed[0] if isinstance(fixed, tuple) else fixed
-    return _split_short_digest(text)
+    sections = _split_short_digest(text)
+
+    # ---- Output gate (anti-stub) --------------------------------------- #
+    # If the LLM hallucinated a placeholder even though we have real
+    # content, retry once with a hard refusal prompt. If the second attempt
+    # still stubs, downgrade cleanly so the user can tell from Discord /
+    # vault that the digest needs manual review.
+    from pipeline.lib import stub_detection  # noqa: PLC0415
+    summary = sections.get("summary_zh", "")
+    has_real_input = bool(translated_text and translated_text.strip())
+    if has_real_input and stub_detection.is_stub_summary(summary):
+        reason_first = stub_detection.stub_reason(summary)
+        logger.warning(
+            "step_structure_short: stub detected (reason=%r) on first call "
+            "for video %s; retrying with hard refusal prompt",
+            reason_first, video.id,
+        )
+        retry_user = (
+            f"{user}\n\n---\n\n"
+            f"⚠️ 你上一個回應({reason_first!r})是 placeholder,違反規則。"
+            f"輸入逐字稿實際有 {len(translated_text)} 個字、實際有影片內容。"
+            "請**只用**上面那段逐字稿寫「一句話摘要」(200 字以內、直接從影片主題切入),"
+            "**禁止**寫「影片...無法...」「伺服器錯誤」「placeholder」這類字串。"
+            "若你仍堅持要寫 placeholder,請回應 `__REFUSE__` 三個字就好。"
+        )
+        text2 = _call_llm_short(retry_user, llm_timeout=llm_timeout)
+        if text2 is not None:
+            text2 = text2.strip()
+            if has_simplified(text2):
+                fixed = force_traditional(text2)
+                text2 = fixed[0] if isinstance(fixed, tuple) else fixed
+            if text2.strip() == "__REFUSE__":
+                logger.warning(
+                    "step_structure_short: LLM refused after stub-detection "
+                    "retry for video %s; downgrading to (內容待補)",
+                    video.id,
+                )
+            else:
+                sections2 = _split_short_digest(text2)
+                if not stub_detection.is_stub_summary(sections2.get("summary_zh", "")):
+                    logger.info(
+                        "step_structure_short: stub fixed on retry for video %s",
+                        video.id,
+                    )
+                    return sections2
+                logger.warning(
+                    "step_structure_short: stub STILL detected after retry "
+                    "(reason=%r) for video %s; downgrading to (內容待補)",
+                    stub_detection.stub_reason(sections2.get("summary_zh", "")),
+                    video.id,
+                )
+        # Fallthrough: downgrade to placeholder so the vault file is still
+        # produced but the user can see the digest needs manual review.
+        return {
+            "summary_zh": "(內容待補 — LLM 兩次都輸出 placeholder,需手動確認)",
+            "analyst_zh": "(無)",
+            "producer_zh": "(無 — 自動跳過)",
+            "vocab_zh": "",
+        }
+    return sections
+
+
+def _call_llm_short(user: str, llm_timeout: int) -> str | None:
+    """Single LLM call helper for ``step_structure_short``.
+
+    Returns the assistant text on success, ``None`` on any error (timeout,
+    connection, JSON decode). Kept separate so the retry path can reuse it.
+    """
+    try:
+        from reddit_safe.pipeline.llm_client import call  # type: ignore
+        messages = [
+            {"role": "system", "content": SHORT_STRUCTURE_SYSTEM_PROMPT},
+            {"role": "user", "content": user},
+        ]
+        text, _usage = call(messages, timeout=llm_timeout)
+        return text
+    except Exception as e:  # noqa: BLE001
+        logger.warning("step_structure_short: LLM call failed: %s", e)
+        return None
 
 
 def _split_short_digest(text: str) -> dict:
