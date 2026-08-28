@@ -103,3 +103,49 @@ FIRESTORE_PROJECT_ID=your-project \
 |-----------------------|----------------------|-------------|
 | ProcessedContent | `processed` | `source_hash` |
 | ReactionPicks | `reactions` | `reaction_id` |
+
+## 7. Vault split (code repo ↔ vault collection)
+
+The pipeline code lives in ``ado_hermes_reddit_scrapper``; vault markdown
+lives in a separate git repo ``hermes_vault_collection``:
+
+```
+/root/projects/ado_hermes_reddit_scrapper/   # PIPELINE_ROOT — code only
+/root/projects/hermes_vault_collection/      # HERMES_VAULT_ROOT — vault only
+  immobilien-kb/vault/
+  podcast-kb/vault/
+```
+
+Add to ``~/.hermes/.env`` (Phase 2b, after merging this PR):
+
+```bash
+PIPELINE_ROOT=/root/projects/ado_hermes_reddit_scrapper
+HERMES_VAULT_ROOT=/root/projects/hermes_vault_collection
+# optional overrides (defaults shown):
+# HERMES_VAULT_GITHUB_REPO=hermes_vault_collection
+# HERMES_VAULT_GITHUB_OWNER=clarktao-dev
+```
+
+Path resolution is centralised in ``pipeline/lib/paths.py``. When
+``HERMES_VAULT_ROOT`` is unset, ``VAULT_ROOT`` falls back to
+``PIPELINE_ROOT`` so the mono-repo layout still works until Phase 3.
+
+**Boundaries (do not change):**
+
+- ``push_to_github.py`` stages only ``podcast-kb/vault/`` or
+  ``immobilien-kb/vault/`` — never ``podcast-kb/content/`` (fetch-stage
+  artifacts stay in the pipeline repo).
+- YouTube vault has two historical directory schemas under
+  ``immobilien-kb/vault/YouTube/``; pipelines preserve both.
+- ``podcast-kb/vault/Daily/_stubs_backup/`` is a local staging area; rsync
+  ``--delete`` from the pipeline repo does not remove it.
+
+**Verify after deploy:**
+
+```bash
+cd /root/projects/ado_hermes_reddit_scrapper
+python3 -m pytest pipeline/tests/test_paths.py -v
+python3 pipeline/youtube_daily.py --dry-run   # writes should target HERMES_VAULT_ROOT
+python3 pipeline/news_daily.py --dry-run
+```
+

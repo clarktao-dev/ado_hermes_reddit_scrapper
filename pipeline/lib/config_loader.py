@@ -7,6 +7,8 @@ import json
 import os
 from functools import lru_cache
 
+from pipeline.lib.paths import IMMO_VAULT, github_vault_repo, github_vault_repo_dir
+
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config")
 
 
@@ -25,6 +27,11 @@ def load_config():
         with open(os.path.join(_CONFIG_DIR, fname), encoding="utf-8") as f:
             data = json.load(f)
         cfg.update(data)
+    if "vault" in cfg:
+        cfg["vault"]["root"] = str(IMMO_VAULT)
+    if "github" in cfg:
+        cfg["github"]["repo_dir"] = str(github_vault_repo_dir())
+        cfg["github"]["repo"] = github_vault_repo()
     return cfg
 
 

@@ -1,12 +1,43 @@
 #!/usr/bin/env python3
-"""Push immobilien-kb to GitHub via paramiko (bypasses @-mangle)."""
+"""Push vault markdown to GitHub via paramiko (bypasses @-mangle).
+
+Only the vault collection repo is pushed (``HERMES_VAULT_ROOT``). Stage
+``podcast-kb/vault/`` or ``immobilien-kb/vault/`` in the daily pipelines
+before calling this script — never ``podcast-kb/content/``.
+
+Usage:
+    python3 push_to_github.py --scope podcast
+    python3 push_to_github.py --scope immobilien
+"""
+from __future__ import annotations
+
+import argparse
+import io
+import os
 import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 sys.path.insert(0, "/root/.hermes/hermes-agent/venv/lib/python3.11/site-packages")
 
-import io
-import paramiko
-from dulwich.pack import write_pack_objects
-from dulwich.repo import Repo
+import paramiko  # noqa: E402
+from dulwich.pack import write_pack_objects  # noqa: E402
+from dulwich.repo import Repo  # noqa: E402
+
+from pipeline.lib.paths import (  # noqa: E402
+    IMMO_VAULT_GIT_PATH,
+    PODCAST_VAULT_GIT_PATH,
+    github_vault_repo,
+    github_vault_repo_dir,
+)
+
+SCOPES = {
+    "podcast": PODCAST_VAULT_GIT_PATH,
+    "immobilien": IMMO_VAULT_GIT_PATH,
+}
 
 
 def recv_exact(sock, n, timeout=30):
@@ -65,26 +96,41 @@ def build_pack(repo_dir):
 
 
 def main():
-    REPO_DIR = "/root/projects/ado_hermes_reddit_scrapper"
-    OWNER = "clarktao-dev"
-    REPO = "ado_hermes_reddit_scrapper"
-    KEY_PATH = "/root/.ssh/ado_reddit_deploy"
-    USERNAME = "git"  # separate arg, no @ string
-    BRANCH = "main"
+    parser = argparse.ArgumentParser(description="Push vault repo to GitHub")
+    parser.add_argument(
+        "--scope",
+        choices=sorted(SCOPES),
+        required=True,
+        help="Vault subtree that was staged (podcast-kb/vault or immobilien-kb/vault)",
+    )
+    args = parser.parse_args()
 
-    pack, head_sha = build_pack(REPO_DIR)
+    repo_dir = str(github_vault_repo_dir())
+    owner = os.environ.get("HERMES_VAULT_GITHUB_OWNER", "clarktao-dev")
+    repo = github_vault_repo()
+    key_path = os.environ.get(
+        "HERMES_VAULT_GITHUB_KEY_PATH",
+        os.environ.get("HERMES_PIPELINE_GITHUB_KEY_PATH", "/root/.ssh/ado_reddit_deploy"),
+    )
+    username = "git"
+    branch = os.environ.get("HERMES_VAULT_GITHUB_BRANCH", "main")
+    vault_subpath = SCOPES[args.scope]
+
+    print(f"[config] repo_dir={repo_dir} remote={owner}/{repo} scope={vault_subpath}")
+
+    pack, head_sha = build_pack(repo_dir)
     print(f"[pack] {len(pack)} bytes, head={head_sha.decode()[:12]}")
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    pkey = paramiko.Ed25519Key.from_private_key_file(KEY_PATH)
-    client.connect("github.com", 22, USERNAME, pkey=pkey,
+    pkey = paramiko.Ed25519Key.from_private_key_file(key_path)
+    client.connect("github.com", 22, username, pkey=pkey,
                    look_for_keys=False, allow_agent=False)
-    print(f"[ssh] connected to github.com:22 as {USERNAME}")
+    print(f"[ssh] connected to github.com:22 as {username}")
 
     chan = client.get_transport().open_session()
     chan.settimeout(60)
-    cmd = f"git-receive-pack '{OWNER}/{REPO}'"
+    cmd = f"git-receive-pack '{owner}/{repo}'"
     chan.exec_command(cmd)
     print(f"[ssh] exec: {cmd}")
 
@@ -112,13 +158,13 @@ def main():
             remote_refs[name] = sha
     print(f"[refs] {remote_refs}")
 
-    old_sha = remote_refs.get(f"refs/heads/{BRANCH}", "0" * 40)
+    old_sha = remote_refs.get(f"refs/heads/{branch}", "0" * 40)
     new_sha = head_sha.decode()
-    newline = f"{old_sha} {new_sha} refs/heads/{BRANCH}\x00 report-status\n".encode()
+    newline = f"{old_sha} {new_sha} refs/heads/{branch}\x00 report-status\n".encode()
     pkt_len = len(newline) + 4
     chan.sendall(("%04x" % pkt_len).encode() + newline)
     chan.sendall(b"0000")
-    print(f"[push] {old_sha[:7]} -> {new_sha[:7]} on refs/heads/{BRANCH}")
+    print(f"[push] {old_sha[:7]} -> {new_sha[:7]} on refs/heads/{branch}")
 
     chan.sendall(pack)
     chan.sendall(b"0000")
@@ -140,7 +186,7 @@ def main():
     response = full.decode(errors="replace")
     print(f"[result]\n{response}")
 
-    ok = "unpack ok" in response and f"ok refs/heads/{BRANCH}" in response
+    ok = "unpack ok" in response and f"ok refs/heads/{branch}" in response
     return 0 if ok else 1
 
 

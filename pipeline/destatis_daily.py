@@ -74,14 +74,16 @@ from pipeline.lib.processed_store import (  # noqa: E402
 # Constants
 # --------------------------------------------------------------------------- #
 
-REPO_ROOT = "/root/projects/ado_hermes_reddit_scrapper"
-CONFIG_PATH = os.path.join(REPO_ROOT, "pipeline/config/destatis_sources.json")
-VAULT_ROOT = os.path.join(REPO_ROOT, "immobilien-kb/vault")
+from pipeline.lib import paths  # noqa: E402
+
+# Backward-compat aliases (tests patch REPO_ROOT as the vault git root).
+REPO_ROOT = str(paths.VAULT_ROOT)
+CONFIG_PATH = str(paths.DESTATIS_SOURCES_CONFIG)
+VAULT_ROOT = str(paths.IMMO_VAULT)
 STAT_SUBDIR = "Stat"
-PUSH_SCRIPT = os.path.join(REPO_ROOT, "push_to_github.py")
-DISCORD_SENDER = os.path.join(
-    REPO_ROOT, "immobilien-kb", "tools", "discord_sender.py"
-)
+PUSH_SCRIPT = str(paths.PUSH_TO_GITHUB_SCRIPT)
+DISCORD_SENDER = str(paths.DISCORD_SENDER)
+IMMO_VAULT_GIT_PATH = paths.IMMO_VAULT_GIT_PATH
 
 # Airtable ledger — same base as youtube_daily / news_daily, see
 # pipeline.lib.processed_store. Override via env var if needed.
@@ -642,10 +644,10 @@ def step_push_github(
     repo_root: str = REPO_ROOT,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Stage + commit + push immobilien-kb/ to main.
+    """Stage + commit + push immobilien-kb/vault/ to the vault repo.
 
     Same pattern as :func:`youtube_daily.push_to_github` but scoped to
-    ``immobilien-kb/`` so the destatis run doesn't accidentally sweep
+    ``immobilien-kb/vault/`` so the destatis run doesn't accidentally sweep
     ``podcast-kb/`` writes from a parallel youtube run.
 
     Returns ``{"pushed": bool, "commit_sha": str|None, "error": str|None,
@@ -663,7 +665,7 @@ def step_push_github(
     msg = f"immobilien-kb: {today} destatis daily digest"
 
     cmds = [
-        ["git", "-C", repo_root, "add", "immobilien-kb/"],
+        ["git", "-C", repo_root, "add", f"{IMMO_VAULT_GIT_PATH}/"],
         ["git", "-C", repo_root, "-c", "user.email=ado@hermes.local", "-c",
          "user.name=Ado", "commit", "-m", msg],
     ]
@@ -687,7 +689,8 @@ def step_push_github(
         out["commit_sha"] = sha_proc.stdout.strip()
 
     push_proc = subprocess.run(
-        ["python3", PUSH_SCRIPT], capture_output=True, text=True, timeout=60,
+        ["python3", PUSH_SCRIPT, "--scope", "immobilien"],
+        capture_output=True, text=True, timeout=60,
     )
     out["push"] = {
         "rc": push_proc.returncode,
@@ -890,7 +893,7 @@ def run_pipeline(
                   f"→ immobilien-kb/vault/Stat/{date_str}/_index.md")
             print(f"[dry-run] would push {len(fetched)} Discord embed(s) to "
                   f"channel '{channel}' (prefix '🏗️ [Destatis 官方數據]')")
-            print(f"[dry-run] would git add immobilien-kb/ + commit + push")
+            print(f"[dry-run] would git add {IMMO_VAULT_GIT_PATH}/ + commit + push")
             print(f"[dry-run] would mark_processed {len(fetched)} record(s) "
                   f"in Airtable")
         else:
