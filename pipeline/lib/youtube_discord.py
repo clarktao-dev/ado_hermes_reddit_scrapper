@@ -10,7 +10,9 @@ import subprocess
 from typing import List
 
 
-DISCORD_SENDER = "/root/projects/ado_hermes_reddit_scrapper/immobilien-kb/tools/discord_sender.py"
+from pipeline.lib.paths import DISCORD_SENDER as _DISCORD_SENDER_PATH
+
+DISCORD_SENDER = str(_DISCORD_SENDER_PATH)
 EMBED_MAX_CHARS = 4000  # Discord hard cap is 4096; leave a small safety margin
 
 

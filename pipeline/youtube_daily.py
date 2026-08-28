@@ -58,10 +58,13 @@ from pipeline.lib.processed_store import (  # noqa: E402
 )
 
 
-REPO_ROOT = "/root/projects/ado_hermes_reddit_scrapper"
-CHANNELS_PATH = os.path.join(REPO_ROOT, "pipeline/config/channels.json")
-STATE_PATH = os.path.join(REPO_ROOT, "podcast-kb/state.json")
-PUSH_SCRIPT = os.path.join(REPO_ROOT, "push_to_github.py")
+from pipeline.lib.paths import (  # noqa: E402
+    CHANNELS_CONFIG,
+    PODCAST_STATE_PATH,
+    PODCAST_VAULT_GIT_PATH,
+    PUSH_TO_GITHUB_SCRIPT,
+    VAULT_ROOT,
+)
 PROCESSED_BASE_ID = os.environ.get(
     "AIRTABLE_PROCESSED_CONTENT_BASE_ID", "appHilorcrC5T0p2u"
 )
@@ -78,7 +81,7 @@ if not logger.handlers:
 
 
 def load_channels() -> list:
-    data = json.loads(Path(CHANNELS_PATH).read_text(encoding="utf-8"))
+    data = json.loads(Path(CHANNELS_CONFIG).read_text(encoding="utf-8"))
     return [c for c in data.get("channels", []) if c.get("enabled", True)]
 
 
@@ -445,8 +448,8 @@ def pick_video_for_channel(
     return candidates
 
 
-def push_to_github(repo_root: str, dry_run: bool) -> dict:
-    """Stage + commit + push podcast-kb/ to main.
+def push_to_github(vault_root: str, dry_run: bool) -> dict:
+    """Stage + commit + push podcast-kb/vault/ to the vault repo.
 
     Returns dict with `pushed`, `commit_sha` (str|None), and command stdout/stderr.
     """
@@ -454,13 +457,12 @@ def push_to_github(repo_root: str, dry_run: bool) -> dict:
                  "dry_run": dry_run}
     if dry_run:
         return out
-    repo = Path(repo_root)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     msg = f"podcast-kb: {today} daily digest"
 
     cmds = [
-        ["git", "-C", repo_root, "add", "podcast-kb/"],
-        ["git", "-C", repo_root, "-c", "user.email=ado@hermes.local", "-c",
+        ["git", "-C", vault_root, "add", f"{PODCAST_VAULT_GIT_PATH}/"],
+        ["git", "-C", vault_root, "-c", "user.email=ado@hermes.local", "-c",
          "user.name=Ado", "commit", "-m", msg],
     ]
     for cmd in cmds:
@@ -476,7 +478,7 @@ def push_to_github(repo_root: str, dry_run: bool) -> dict:
             return out
     # Capture the commit SHA so we can backfill ProcessedContent.github_commit_sha
     sha_proc = subprocess.run(
-        ["git", "-C", repo_root, "rev-parse", "HEAD"],
+        ["git", "-C", vault_root, "rev-parse", "HEAD"],
         capture_output=True, text=True, timeout=10,
     )
     if sha_proc.returncode == 0:
@@ -484,7 +486,8 @@ def push_to_github(repo_root: str, dry_run: bool) -> dict:
 
     # push via existing paramiko script
     push_proc = subprocess.run(
-        ["python3", PUSH_SCRIPT], capture_output=True, text=True, timeout=60,
+        ["python3", str(PUSH_TO_GITHUB_SCRIPT), "--scope", "podcast"],
+        capture_output=True, text=True, timeout=60,
     )
     out["push"] = {
         "rc": push_proc.returncode,
@@ -672,7 +675,7 @@ def main() -> int:
 
     # state.json is deprecated — we still load it for backward-compat reads
     # but never write to it from this pipeline.
-    state = youtube_state.StateStore(STATE_PATH)
+    state = youtube_state.StateStore(str(PODCAST_STATE_PATH))
 
     digests = []
     selected: list[tuple[dict, youtube_fetch.VideoMeta, youtube_translate.VideoDigest]] = []
@@ -763,8 +766,9 @@ def main() -> int:
     print(f"\n=== Step 5: write_vault ===")
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     content_kind = "short-summary" if args.mode == "short" else "longform"
+    vault_root = str(VAULT_ROOT)
     vault_summary = youtube_obsidian.step_write_vault(
-        digests, repo_root=REPO_ROOT,
+        digests, repo_root=vault_root,
         date_str=today_str,
         wipe=True,
         content_kind=content_kind,
@@ -783,7 +787,7 @@ def main() -> int:
             print(f"    - {e}")
 
     print(f"\n=== Step 7: push_to_github ===")
-    push_summary = push_to_github(REPO_ROOT, dry_run=args.dry_run)
+    push_summary = push_to_github(vault_root, dry_run=args.dry_run)
     print(f"  pushed={push_summary.get('pushed')}, "
           f"commit_sha={push_summary.get('commit_sha')}, "
           f"dry_run={push_summary.get('dry_run')}")
@@ -808,7 +812,7 @@ def main() -> int:
 
         for ch, video, digest in selected:
             output_path = _video_output_md_path(
-                REPO_ROOT, today_str, digest,
+                vault_root, today_str, digest,
                 content_kind=content_kind,
             )
             tags = ["long-form"] if args.mode == "long" else ["short"]

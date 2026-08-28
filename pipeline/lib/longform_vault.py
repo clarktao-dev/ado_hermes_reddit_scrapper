@@ -25,11 +25,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-# Repo root — `immobilien-kb/` sits next to `pipeline/`
-REPO_ROOT = Path(__file__).resolve().parents[2]
-LONGFORM_ROOT = REPO_ROOT / "immobilien-kb" / "vault" / "Longform"
-SHORTSUMMARY_ROOT = REPO_ROOT / "immobilien-kb" / "vault" / "YouTube"
-PODCAST_LONGFORM_ROOT = REPO_ROOT / "podcast-kb" / "vault" / "Daily"
+from pipeline.lib.paths import IMMO_VAULT, PODCAST_DAILY_VAULT, VAULT_ROOT
+
+# Backward-compat alias used by cleanup_transcripts.py
+REPO_ROOT = VAULT_ROOT
+LONGFORM_ROOT = IMMO_VAULT / "Longform"
+SHORTSUMMARY_ROOT = IMMO_VAULT / "YouTube"
+PODCAST_LONGFORM_ROOT = PODCAST_DAILY_VAULT
 
 
 def _slug(text: str, max_len: int = 60) -> str:

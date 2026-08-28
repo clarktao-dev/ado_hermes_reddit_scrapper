@@ -60,10 +60,17 @@ from pipeline.lib.processed_store import (  # noqa: E402
     make_hash,
     normalize_url,
 )
+from pipeline.lib.paths import (  # noqa: E402
+    DISCORD_SENDER,
+    IMMO_VAULT_GIT_PATH,
+    PUSH_TO_GITHUB_SCRIPT,
+    VAULT_ROOT,
+)
 
-# discord_sender lives outside the package — load it by path.
-_DISCORD_SENDER = os.path.join(_PROJECT_DIR, "immobilien-kb", "tools", "discord_sender.py")
-_PUSH_TO_GITHUB = os.path.join(_PROJECT_DIR, "push_to_github.py")
+# discord_sender lives in the pipeline repo (code, not vault).
+_DISCORD_SENDER = str(DISCORD_SENDER)
+_PUSH_TO_GITHUB = str(PUSH_TO_GITHUB_SCRIPT)
+_VAULT_ROOT = str(VAULT_ROOT)
 
 # ProcessedContent Airtable config (Task 4 — single source of truth for dedup).
 PROCESSED_BASE_ID = os.environ.get(
@@ -1091,7 +1098,7 @@ def step_send_discord(items, cfg, dry_run):
 
 
 def step_push_github(dry_run):
-    """Stage + commit + push immobilien-kb/ to GitHub.
+    """Stage + commit + push immobilien-kb/vault/ to the vault GitHub repo.
 
     Plan 7 (2026-08-19): the previous version just shell-out to
     ``push_to_github.py``, which pushes the *current* HEAD via dulwich /
@@ -1108,14 +1115,14 @@ def step_push_github(dry_run):
     """
     out: dict = {"pushed": False, "commit_sha": None}
     if dry_run:
-        print("  [dry-run] would git add + commit + push immobilien-kb/")
+        print(f"  [dry-run] would git add + commit + push {_VAULT_ROOT}:{IMMO_VAULT_GIT_PATH}/")
         return out
     today = datetime.utcnow().strftime("%Y-%m-%d")
     msg = f"news-kb: {today} daily digest"
 
     cmds = [
-        ["git", "-C", _PROJECT_DIR, "add", "immobilien-kb/"],
-        ["git", "-C", _PROJECT_DIR, "-c", "user.email=ado@hermes.local",
+        ["git", "-C", _VAULT_ROOT, "add", f"{IMMO_VAULT_GIT_PATH}/"],
+        ["git", "-C", _VAULT_ROOT, "-c", "user.email=ado@hermes.local",
          "-c", "user.name=Ado", "commit", "-m", msg],
     ]
     for cmd in cmds:
@@ -1129,10 +1136,13 @@ def step_push_github(dry_run):
             print(f"  [git] stderr: {proc.stderr.strip()[-300:]}")
             return out
 
-    # Now the paramiko push (bypasses @-mangle on the Discord-side SSH).
-    print(f"  exec: python3 {_PUSH_TO_GITHUB}")
-    res = subprocess.run([sys.executable, _PUSH_TO_GITHUB], cwd=_PROJECT_DIR,
-                         capture_output=True, text=True, timeout=120)
+  # Now the paramiko push (bypasses @-mangle on the Discord-side SSH).
+    print(f"  exec: python3 {_PUSH_TO_GITHUB} --scope immobilien")
+    res = subprocess.run(
+        [sys.executable, _PUSH_TO_GITHUB, "--scope", "immobilien"],
+        cwd=_PROJECT_DIR,
+        capture_output=True, text=True, timeout=120,
+    )
     if res.stdout:
         print(f"  [push-to-github stdout] {res.stdout.strip()[-300:]}")
     if res.stderr:
@@ -1140,7 +1150,7 @@ def step_push_github(dry_run):
     out["pushed"] = res.returncode == 0
     if out["pushed"]:
         sha_proc = subprocess.run(
-            ["git", "-C", _PROJECT_DIR, "rev-parse", "HEAD"],
+            ["git", "-C", _VAULT_ROOT, "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=10,
         )
         if sha_proc.returncode == 0:

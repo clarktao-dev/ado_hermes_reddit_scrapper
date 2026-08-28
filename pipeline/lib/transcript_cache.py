@@ -24,9 +24,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-# Repo root — `immobilien-kb/` sits next to `pipeline/`
-REPO_ROOT = Path(__file__).resolve().parents[2]
-TRANSCRIPTS_ROOT = REPO_ROOT / "immobilien-kb" / "vault" / "YouTube"
+from pipeline.lib.paths import IMMO_VAULT, VAULT_ROOT
+
+# Backward-compat alias used by cleanup_transcripts.py
+REPO_ROOT = VAULT_ROOT
+TRANSCRIPTS_ROOT = IMMO_VAULT / "YouTube"
 
 DEFAULT_TTL_DAYS = 30
 
