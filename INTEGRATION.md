@@ -135,6 +135,9 @@ Path resolution is centralised in ``pipeline/lib/paths.py``. When
 - ``push_to_github.py`` stages only ``podcast-kb/vault/`` or
   ``immobilien-kb/vault/`` — never ``podcast-kb/content/`` (fetch-stage
   artifacts stay in the pipeline repo).
+- ``push_to_github.py`` tries ``git push`` first (SSH deploy key), then
+  falls back to the legacy dulwich/paramiko wire protocol. Set
+  ``HERMES_PUSH_PREFER_GIT=0`` to try paramiko first.
 - YouTube vault has two historical directory schemas under
   ``immobilien-kb/vault/YouTube/``; pipelines preserve both.
 - ``podcast-kb/vault/Daily/_stubs_backup/`` is a local staging area; rsync
