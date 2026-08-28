@@ -45,10 +45,10 @@
 
 # 開啟前檢查清單
 # --------------
-# 1. AIRTABLE_API_KEY 在 daemon / cron 環境都設好
+# 1. Firestore credentials in daemon / cron environment
 # 2. DISCORD_BOT_TOKEN(給 daemon)
 # 3. discord_picks.py daemon 已在 systemd / nohup 跑(Plan 4 被動模式)
-# 4. ReactionPicks 表已建立: setup_airtable_reaction_picks.py
+# 4. Firestore reactions collection 已就緒: setup_firestore.py
 # 5. weekly_recap.py --dry-run 看過輸出格式沒問題
 
 version: 1
@@ -98,9 +98,10 @@ jobs:
     script: pipeline/scripts/weekly_recap.py
     args: []
     env:
-      - AIRTABLE_API_KEY
+      - FIRESTORE_PROJECT_ID
+      - GOOGLE_APPLICATION_CREDENTIALS
     description: |
-      週二/五回顧推送。從 Airtable ReactionPicks 拉過去 3 天
+      週二/五回顧推送。從 Firestore reactions collection 拉過去 3 天
       (預設 ``--days 3``,可覆寫)user 在 #每日頭條 / #每日podcast /
       #每日reddit 按過 ✅ 的清單,推 1 則 header + 每則獨立 message
       到 channel 1539010288026779688(#挑文區),問 user 怎麼處理每則
@@ -113,4 +114,4 @@ jobs:
     notes:
       - "dry-run: python3 pipeline/scripts/weekly_recap.py --dry-run"
       - "覆寫天數: python3 pipeline/scripts/weekly_recap.py --days 7"
-      - "idempotent Airtable setup: pipeline/scripts/setup_airtable_reaction_picks.py"
+      - "setup: pipeline/scripts/setup_firestore.py"

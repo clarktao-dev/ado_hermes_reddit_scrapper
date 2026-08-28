@@ -29,13 +29,8 @@ def banner(title: str) -> None:
 
 
 def main() -> int:
-    # Bring the offline fixture's fake layer into scope.
-    from pipeline.tests.test_processed_store import FakeAirtable
-    from unittest import mock
-
-    fake = FakeAirtable()
-    store = ProcessedStore("appFAKE", "ProcessedContent", api_key="pat_test")
-    store._request = mock.MagicMock(side_effect=fake.handle)  # type: ignore[assignment]
+    memory: dict = {}
+    store = ProcessedStore("appFAKE", "ProcessedContent", _memory=memory)
 
     # ------------------------------------------------------------------
     banner("Scenario 1 — INSERT: write 1 record, verify it persists")
@@ -51,19 +46,19 @@ def main() -> int:
         tags=["long-form"],
     )
     print(f"  mark_processed returned record id: {rid}")
-    assert rid.startswith("rec"), "record id should start with 'rec'"
-    assert rid in fake.records, "record should be in store"
-    rec = fake.records[rid]
-    print(f"  source_hash = {rec['fields']['source_hash']}")
-    print(f"  source_type = {rec['fields']['source_type']}")
-    print(f"  title       = {rec['fields']['title']}")
-    print(f"  channels    = {rec['fields']['channels']}")
-    print(f"  tags        = {rec['fields']['tags']}")
-    print(f"  metadata    = {rec['fields']['metadata']}")
-    print(f"  first_seen_at = {rec['fields']['first_seen_at']}")
-    print(f"  processed_at  = {rec['fields']['processed_at']}")
-    print(f"  TOTAL RECORDS = {len(fake.records)}")
-    assert len(fake.records) == 1
+    assert len(rid) == 64, "record id should be source_hash hex"
+    assert rid in memory, "record should be in store"
+    rec = memory[rid]
+    print(f"  source_hash = {rec['source_hash']}")
+    print(f"  source_type = {rec['source_type']}")
+    print(f"  title       = {rec['title']}")
+    print(f"  channels    = {rec['channels']}")
+    print(f"  tags        = {rec['tags']}")
+    print(f"  metadata    = {rec['metadata']}")
+    print(f"  first_seen_at = {rec['first_seen_at']}")
+    print(f"  processed_at  = {rec['processed_at']}")
+    print(f"  TOTAL RECORDS = {len(memory)}")
+    assert len(memory) == 1
     print("  PASS — 1 record inserted, all fields populated")
 
     # ------------------------------------------------------------------
@@ -93,15 +88,15 @@ def main() -> int:
     print(f"  1st call returned: {rid}")
     print(f"  2nd call returned: {rid_2}")
     print(f"  same record id?    {rid == rid_2}")
-    print(f"  total records:     {len(fake.records)}")
-    rec_after = fake.records[rid]
-    print(f"  updated title:     {rec_after['fields']['title']}")
-    print(f"  updated tags:      {rec_after['fields']['tags']}")
-    print(f"  updated metadata:  {rec_after['fields']['metadata']}")
+    print(f"  total records:     {len(memory)}")
+    rec_after = memory[rid]
+    print(f"  updated title:     {rec_after['title']}")
+    print(f"  updated tags:      {rec_after['tags']}")
+    print(f"  updated metadata:  {rec_after['metadata']}")
     stats = store.stats(days=7)
     print(f"  stats(days=7):     {stats}")
     assert rid == rid_2
-    assert len(fake.records) == 1
+    assert len(memory) == 1
     assert stats.get("youtube") == 1
     print("  PASS — 2nd call updated the same record, stats shows 1")
 
@@ -113,9 +108,9 @@ def main() -> int:
         discord_message_id="1234567890",
         github_commit_sha="abcdef1234",
     )
-    rec_final = fake.records[rid]
-    print(f"  discord_message_id = {rec_final['fields'].get('discord_message_id')}")
-    print(f"  github_commit_sha  = {rec_final['fields'].get('github_commit_sha')}")
+    rec_final = memory[rid]
+    print(f"  discord_message_id = {rec_final.get('discord_message_id')}")
+    print(f"  github_commit_sha  = {rec_final.get('github_commit_sha')}")
     print("  PASS — side-effect columns updated")
 
     banner("ALL 3 SCENARIOS PASS")

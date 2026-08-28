@@ -11,66 +11,37 @@ Each item message asks the user to react with:
 - ❌ = 跳過
 
 The user can react normally in Discord; we don't capture these decisions
-into Airtable in this round — that's a follow-up.
+into Firestore in this round — that's a follow-up.
 """
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-sys.path.insert(0, "/root/projects/ado_hermes_reddit_scrapper/pipeline")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
-from urllib.parse import quote
+
+from pipeline.lib.reaction_store import ReactionStoreError, get_reaction_store
 
 logger = logging.getLogger("weekly_recap")
 
-# --- Config (env-overridable) ---
-AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_PROCESSED_CONTENT_BASE_ID", "appHilorcrC5T0p2u")
-AIRTABLE_REACTION_PICKS_TABLE_ID = os.environ.get("AIRTABLE_REACTION_PICKS_TABLE_ID", "tblUzHUmmL6IwHJch")
-AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY", "")
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 TARGET_CHANNEL_ID = "1539010288026779688"  # #挑文區
 DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "1306402830617616485")
 DEFAULT_DAYS = 3
-SORT_DESC = "reaction_date"  # newest first
-EMOJIS = ["✅", "❌"]  # ✅ 寫長文 / ❌ 跳過 — full set added in render
-PROCESS_DECISION_EMOJIS = ["✅", "🟡", "📝", "❌"]
 PROCESS_DECISION_LABEL = "✅=寫長文 · 🟡=Podcast 主題 · 📝=其他 · ❌=跳過"
 
 
-def airtable_query(days: int) -> list[dict[str, Any]]:
-    """Fetch ReactionPicks records newer than `days` ago."""
-    if not AIRTABLE_API_KEY:
-        raise RuntimeError("AIRTABLE_API_KEY not set in env")
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    cutoff_iso = cutoff.isoformat(timespec="seconds")
-    formula = f"IS_AFTER({{reaction_date}}, '{cutoff_iso}')"
-    url = (
-        f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_REACTION_PICKS_TABLE_ID}"
-        f"?filterByFormula={quote(formula)}"
-        f"&sort[0][field]=reaction_date&sort[0][direction]=desc&pageSize=100"
-    )
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-    records: list[dict[str, Any]] = []
-    while url:
-        r = requests.get(url, headers=headers, timeout=20)
-        if r.status_code != 200:
-            raise RuntimeError(f"Airtable HTTP {r.status_code}: {r.text[:200]}")
-        data = r.json()
-        records.extend(data.get("records", []))
-        url = data.get("offset") and (
-            f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_REACTION_PICKS_TABLE_ID}"
-            f"?filterByFormula={quote(formula)}"
-            f"&sort[0][field]=reaction_date&sort[0][direction]=desc&pageSize=100"
-            f"&offset={data['offset']}"
-        )
-    return records
+def query_recent_reactions(days: int) -> list[dict[str, Any]]:
+    """Fetch ReactionPicks records newer than ``days`` ago."""
+    try:
+        return get_reaction_store().query_recent(days)
+    except ReactionStoreError as e:
+        raise RuntimeError(str(e)) from e
 
 
 def render_header(n: int, days: int) -> str:
@@ -136,9 +107,9 @@ def main() -> int:
     logger.info("fetching ReactionPicks past %s days", args.days)
 
     try:
-        records = airtable_query(args.days)
+        records = query_recent_reactions(args.days)
     except Exception as e:
-        logger.error("airtable fetch failed: %s", e)
+        logger.error("firestore fetch failed: %s", e)
         return 1
 
     logger.info("found %d records", len(records))
@@ -157,7 +128,6 @@ def main() -> int:
             print(render_message(i, len(records), rec))
         return 0
 
-    # Push header
     try:
         header_id = push_message(header)
         logger.info("header pushed (id=%s)", header_id)
@@ -165,7 +135,6 @@ def main() -> int:
         logger.error("header push failed: %s", e)
         return 2
 
-    # Push per-item
     pushed = 0
     for i, rec in enumerate(records, 1):
         content = render_message(i, len(records), rec)

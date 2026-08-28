@@ -105,18 +105,17 @@ def _load_env_file(path: Path) -> Dict[str, str]:
 
 
 def _resolve_creds() -> Tuple[Optional[str], Optional[str]]:
-    """Return ``(api_key, base_id)`` from /root/.hermes/.env or current env.
-
-    Does not raise — missing values are returned as ``None`` so the caller
-    can emit a single friendly error message.
-    """
+    """Return ``(project_id, creds_path)`` from env file or current env."""
     file_vars = _load_env_file(ENV_FILE)
-    api_key = os.environ.get("AIRTABLE_API_KEY") or file_vars.get("AIRTABLE_API_KEY")
-    base_id = (
-        os.environ.get("AIRTABLE_PROCESSED_CONTENT_BASE_ID")
-        or file_vars.get("AIRTABLE_PROCESSED_CONTENT_BASE_ID")
+    project_id = (
+        os.environ.get("FIRESTORE_PROJECT_ID")
+        or file_vars.get("FIRESTORE_PROJECT_ID")
     )
-    return api_key, base_id
+    creds_path = (
+        os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        or file_vars.get("GOOGLE_APPLICATION_CREDENTIALS")
+    )
+    return project_id, creds_path
 
 
 # ---------------------------------------------------------------------------
@@ -205,19 +204,19 @@ def _make_store() -> Tuple[Optional["ProcessedStore"], Optional[str]]:
     a human-readable explanation. We do not raise from here so the
     subcommand handlers can present a single uniform error to the user.
     """
-    api_key, base_id = _resolve_creds()
-    if not api_key:
+    project_id, creds_path = _resolve_creds()
+    if not project_id:
         return None, (
-            "AIRTABLE_API_KEY not found in /root/.hermes/.env. "
-            "Add a PAT (starts with pat...) and re-run."
+            "FIRESTORE_PROJECT_ID not found in /root/.hermes/.env. "
+            "Add your GCP project id and re-run."
         )
-    if not base_id:
+    if not creds_path and not os.environ.get("FIRESTORE_CREDENTIALS_JSON"):
         return None, (
-            "AIRTABLE_PROCESSED_CONTENT_BASE_ID not found in /root/.hermes/.env. "
-            "Expected something like 'app...'. Add it and re-run."
+            "GOOGLE_APPLICATION_CREDENTIALS not found in /root/.hermes/.env. "
+            "Point it at your service-account JSON key and re-run."
         )
     try:
-        return ProcessedStore(base_id, DEFAULT_TABLE, api_key=api_key), None
+        return ProcessedStore(), None
     except ProcessedStoreAuthError as e:
         return None, f"auth error while initialising ProcessedStore: {e}"
     except ProcessedStoreError as e:

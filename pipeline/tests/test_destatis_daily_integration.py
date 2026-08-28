@@ -253,25 +253,16 @@ class _FakeAirtable:
 
 @pytest.fixture
 def fake_airtable(monkeypatch: pytest.MonkeyPatch):
-    """Return a ``(_FakeAirtable, install_fn)`` pair.
+    """Return a ``(memory_dict, factory_fn)`` pair for ProcessedStore tests."""
+    memory: Dict[str, Dict[str, Any]] = {}
 
-    ``install_fn(store)`` patches the store's ``_http_call`` to the
-    fake. The test should call ``install_fn(store)`` on every
-    ProcessedStore it creates (typically only one).
-    """
-    fake = _FakeAirtable()
-    monkeypatch.setenv("AIRTABLE_API_KEY", "pat_test_offline_integration")
+    def _factory() -> ProcessedStore:
+        return ProcessedStore("appFAKE", "ProcessedContent", _memory=memory)
 
     def _install(store: ProcessedStore) -> None:
-        # Mirror the pattern from test_processed_store.py — replace
-        # _http_call so the retry/backoff layer runs but the network
-        # call is answered in-memory.
-        def _patched(method, url, headers, data, timeout=None):
-            return fake.handle(method, url, headers, data, timeout or 30.0)
-        store._http_call = _patched  # type: ignore[assignment]
-        store._fake = fake  # type: ignore[attr-defined]
+        store._memory = memory  # type: ignore[attr-defined]
 
-    return fake, _install
+    return memory, _factory, _install
 
 
 # --------------------------------------------------------------------------- #
@@ -471,7 +462,7 @@ class TestAirtableDedupBlocksRerun:
         fake_airtable,
         tmp_path: Path,
     ) -> None:
-        fake, install = fake_airtable
+        memory, _factory, install = fake_airtable
 
         # Redirect vault writes into tmp_path so the real
         # immobilien-kb/ tree is not touched.
@@ -564,11 +555,9 @@ class TestAirtableDedupBlocksRerun:
         monkeypatch.setattr(
             destatis_daily, "fetch_and_parse", _fake_fetch,
         )
-        # Snapshot the Airtable call count before the dry-run. The
-        # dry-run code path must NOT make any GET / PATCH / POST
-        # calls against the ledger (the gate is skipped entirely
-        # when dry_run=True).
-        calls_before_dryrun = len(fake.call_log)
+        # Snapshot record count before the dry-run. The dry-run path must
+        # not write new ledger rows.
+        count_before_dryrun = len(memory)
 
         rc = run_pipeline(
             push=False, dry_run=True,
@@ -577,10 +566,9 @@ class TestAirtableDedupBlocksRerun:
         )
         assert rc == 0
 
-        # No new Airtable calls during the dry-run.
-        new_calls = fake.call_log[calls_before_dryrun:]
-        assert new_calls == [], (
-            f"dry-run made unexpected Airtable calls: {new_calls}"
+        assert len(memory) == count_before_dryrun, (
+            f"dry-run wrote unexpected ledger rows: before={count_before_dryrun} "
+            f"after={len(memory)}"
         )
 
         # The seed records survived the dry-run (dry-run is read-only).
@@ -603,7 +591,7 @@ class TestDiscordPushMocked:
         fake_airtable,
         tmp_path: Path,
     ) -> None:
-        fake, install = fake_airtable
+        memory, _factory, install = fake_airtable
 
         # Redirect vault + repo roots.
         monkeypatch.setattr(
@@ -677,7 +665,7 @@ class TestDiscordPushMocked:
 
         # Clear the Airtable ledger to guarantee all 3 sources go
         # through vault + Discord + Airtable (no dedup short-circuit).
-        fake.records.clear()
+        memory.clear()
         store.clear_cache()
 
         # Run with --push (the call we actually want to test).

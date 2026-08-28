@@ -67,11 +67,7 @@ DEFAULT_DISCORD_CHANNEL = "longform"  # → see discord_sender.py aliases dict
 # ---------------------------------------------------------------------------
 
 def _get_store() -> ProcessedStore:
-    base_id = os.environ.get("AIRTABLE_PROCESSED_CONTENT_BASE_ID")
-    api_key = os.environ.get("AIRTABLE_API_KEY")
-    if not base_id:
-        raise SystemExit("AIRTABLE_PROCESSED_CONTENT_BASE_ID not set")
-    return ProcessedStore(base_id=base_id, table_name=DEFAULT_TABLE, api_key=api_key)
+    return ProcessedStore()
 
 
 def _patch_record(store: ProcessedStore, record_id: str, source_hash: str,

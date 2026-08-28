@@ -268,80 +268,20 @@ def _load_guild_id() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Airtable I/O(複製自 daily_digest.py,本檔獨立 daemon,不 cross-import)
-# ---------------------------------------------------------------------------
+from pipeline.lib.reaction_store import (  # noqa: E402
+    ReactionStore,
+    ReactionStoreError,
+    get_reaction_store,
+)
 
-class ReactionStoreError(RuntimeError):
-    pass
-
-
-def _airtable_request(
-    method: str,
-    path: str,
-    *,
-    body: Optional[Dict[str, Any]] = None,
-    timeout: float = 30.0,
-) -> Dict[str, Any]:
-    token = os.environ.get("AIRTABLE_API_KEY", "")
-    if not token:
-        raise ReactionStoreError("AIRTABLE_API_KEY env var not set")
-    url = f"https://api.airtable.com/v0{path}"
-    data: Optional[bytes] = None
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-    }
-    if body is not None:
-        data = json.dumps(body).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = request.Request(url, data=data, method=method, headers=headers)
-    try:
-        with request.urlopen(req, timeout=timeout) as resp:
-            payload = resp.read().decode("utf-8")
-            return json.loads(payload) if payload else {}
-    except error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")
-        raise ReactionStoreError(
-            f"{method} {path} -> {e.code}: {err_body}"
-        ) from e
+_REACTION_STORE: Optional[ReactionStore] = None
 
 
-def find_reaction_pick(reaction_id: str) -> Optional[str]:
-    """用 ``reaction_id`` 找既有 row;回傳 record id 或 None。"""
-    formula = f"{{reaction_id}}='{reaction_id}'"
-    path = f"/{BASE_ID}/{parse.quote(REACTION_TABLE, safe='')}"
-    params = {"filterByFormula": formula, "maxRecords": 1}
-    full_path = f"{path}?{parse.urlencode(params)}"
-    resp = _airtable_request("GET", full_path)
-    recs = resp.get("records", [])
-    if recs:
-        return recs[0]["id"]
-    return None
-
-
-def create_reaction_pick(record_fields: Dict[str, Any]) -> str:
-    """寫一筆 ReactionPicks record。回傳 record id。
-
-    Airtable POST /<base>/<table> with a single ``fields`` body 回傳
-    ``{"id": "...", "fields": {...}}`` 頂層(沒包 ``records``)。
-    Batch 模式才包 ``records``。
-    """
-    body = {"typecast": True, "fields": record_fields}
-    path = f"/{BASE_ID}/{parse.quote(REACTION_TABLE, safe='')}"
-    resp = _airtable_request("POST", path, body=body)
-    recs = resp.get("records") or []
-    if recs:
-        return recs[0]["id"]
-    if resp.get("id"):
-        return resp["id"]
-    raise ReactionStoreError(f"create returned no records: {resp}")
-
-
-# ---------------------------------------------------------------------------
-# Reaction table id (module-level,set on startup)
-# ---------------------------------------------------------------------------
-
-REACTION_TABLE: str = DEFAULT_REACTION_TABLE  # 由 _run() 在啟動時設
+def _get_reaction_store() -> ReactionStore:
+    global _REACTION_STORE
+    if _REACTION_STORE is None:
+        _REACTION_STORE = get_reaction_store()
+    return _REACTION_STORE
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +442,7 @@ class PickBot(discord.Client):
         # 4. dedup key(同一 user / channel / message / emoji 重試不重複寫)
         reaction_id = f"{user_id}-{channel_id_str}-{payload.message_id}-{emoji_name}"
         try:
-            existing = find_reaction_pick(reaction_id)
+            existing = _get_reaction_store().find_by_reaction_id(reaction_id)
         except ReactionStoreError as e:
             logger.error("find_reaction_pick failed (%s): %s", reaction_id, e)
             return
@@ -574,7 +514,7 @@ class PickBot(discord.Client):
             fields["embed_image"] = embed_image
 
         try:
-            rec_id = create_reaction_pick(fields)
+            rec_id = _get_reaction_store().create_reaction_pick(fields)
         except ReactionStoreError as e:
             err = str(e)
             # 422 通常是 reaction_id 已存在(極短時間內兩次 reaction)。
@@ -598,8 +538,7 @@ class PickBot(discord.Client):
 # ---------------------------------------------------------------------------
 
 async def _run() -> int:
-    global REACTION_TABLE
-    REACTION_TABLE = _load_reaction_table_id()
+    _get_reaction_store()
 
     token = _load_bot_token()
     allowed = _load_allowed_users()
@@ -617,8 +556,8 @@ async def _run() -> int:
         )
 
     logger.info(
-        "Airtable: base=%s table=%s (set AIRTABLE_REACTION_PICKS_TABLE_ID to override)",
-        BASE_ID, REACTION_TABLE,
+        "Firestore reactions collection=%s",
+        os.environ.get("FIRESTORE_REACTIONS_COLLECTION", "reactions"),
     )
     logger.info(
         "Listen channels: %s (Plan 4 spec — #每日頭條 / #每日podcast / #每日reddit)",

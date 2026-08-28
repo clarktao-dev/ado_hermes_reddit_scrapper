@@ -1,4 +1,4 @@
-# ProcessedContent ledger — integration guide
+# ProcessedContent ledger — integration guide (Firestore)
 
 This ledger records every item the pipeline has already processed so the
 `youtube_daily.py`, `news_daily.py`, and future `reddit_daily.py` /
@@ -6,55 +6,61 @@ This ledger records every item the pipeline has already processed so the
 (Discord message IDs, GitHub commit SHAs).
 
 Source: `pipeline/lib/processed_store.py`
-Schema: `pipeline/scripts/airtable_processed_content_schema.json`
-Setup:  `pipeline/scripts/setup_airtable_processed_content.py`
+Schema: `pipeline/scripts/airtable_processed_content_schema.json` (field names unchanged)
+Setup:  `pipeline/scripts/setup_firestore.py`
+Migration: `pipeline/scripts/migrate_airtable_to_firestore.py`
 
-## 1. One-time setup (PM runs)
+## 1. One-time setup
 
 ```bash
-# 1. Add a Personal Access Token (pat_...) to ~/.hermes/.env:
-echo 'AIRTABLE_API_KEY=pat_your_token' >> ~/.hermes/.env
+# 1. Create a GCP project + enable Firestore (Native mode).
+# 2. Create a service account with Cloud Datastore User role.
+# 3. Download the JSON key to e.g. ~/.hermes/firestore-sa.json
 
-# 2. Create the "Pipelines" base by hand at https://airtable.com
-#    and grant the token access to it.
+echo 'FIRESTORE_PROJECT_ID=your-gcp-project' >> ~/.hermes/.env
+echo 'GOOGLE_APPLICATION_CREDENTIALS=/root/.hermes/firestore-sa.json' >> ~/.hermes/.env
+echo 'FIRESTORE_PROCESSED_COLLECTION=processed' >> ~/.hermes/.env
+echo 'FIRESTORE_REACTIONS_COLLECTION=reactions' >> ~/.hermes/.env
 
-# 3. Provision the table + fields:
-cd /root/projects/ado_hermes_reddit_scrapper
-python3 pipeline/scripts/setup_airtable_processed_content.py
-#  -> prints BASE_ID and instructions for the 3 views (Meta API
-#     cannot create views — make them in the Airtable UI).
-
-# 4. Wire the base id into your runtime env:
-echo 'PIPELINE_AIRTABLE_BASE_ID=app_xxxx' >> ~/.hermes/.env
+pip install -r pipeline/requirements.txt
+python3 pipeline/scripts/setup_firestore.py --write-probe
 ```
 
-The 13 fields, their types, and the 3 views are documented in
-`pipeline/scripts/airtable_processed_content_schema.json`.
+## 2. Migrate existing Airtable data (one-time)
 
-## 2. Standard usage from a daily pipeline
+You still need `AIRTABLE_API_KEY` for the export step only:
+
+```bash
+AIRTABLE_API_KEY=pat_xxx python3 pipeline/scripts/migrate_airtable_to_firestore.py --dry-run
+AIRTABLE_API_KEY=pat_xxx python3 pipeline/scripts/migrate_airtable_to_firestore.py
+```
+
+This copies:
+- `ProcessedContent` → Firestore `processed` collection (document id = `source_hash`)
+- `ReactionPicks` → Firestore `reactions` collection (document id = `reaction_id`)
+
+## 3. Standard usage from a daily pipeline
 
 ```python
-from pipeline.lib.processed_store import ProcessedStore
+from pipeline.lib.processed_store import ProcessedStore, make_hash
 
-store = ProcessedStore(base_id="app_xxxx")  # or read PIPELINE_AIRTABLE_BASE_ID
+store = ProcessedStore()  # reads Firestore config from env
 
-# Skip items we've already done
 for item in candidates:
     if store.is_processed("youtube", item["video_id"]):
         continue
-    artifact = render(item)              # your existing work
+    artifact = render(item)
     record_id = store.mark_processed(
         source_type="youtube",
         source_id=item["video_id"],
         title=item["title"],
-        channels=[item["channel"]],      # e.g. "youtube.ex_makler"
+        channels=[item["channel"]],
         pipeline_run_id=run_id,
         output_path=artifact.path,
         metadata={"duration": item["duration"], "lang": "de"},
         tags=["long-form"],
     )
 
-# After Discord push / GitHub push
 store.update_side_effects(
     source_hash=make_hash("youtube", item["video_id"]),
     discord_message_id=msg.id,
@@ -63,56 +69,37 @@ store.update_side_effects(
 ```
 
 `mark_processed` is **idempotent**: re-running with the same
-`source_type` + `source_id` updates the existing record instead of
-creating a duplicate. `is_processed` uses an in-process cache so a
-single run only does one round-trip per unique item.
+`source_type` + `source_id` updates the existing Firestore document.
 
-## 3. Quick read APIs
+## 4. AI agent / cron compatibility
 
-```python
-# Recent items for a given source
-recent = store.get_recent("news", days=7, limit=50)
+No code changes are needed in `youtube_daily.py`, `news_daily.py`, or
+`destatis_daily.py` beyond setting the new env vars. The public
+`ProcessedStore` API is unchanged — only the backend moved from Airtable to
+Firestore.
 
-# Counts per source for the last N days (for dashboards / health checks)
-counts = store.stats(days=7)
-# -> {"youtube": 12, "news": 4, "reddit": 7}
-```
+Required env for cron / daemons:
+- `FIRESTORE_PROJECT_ID`
+- `GOOGLE_APPLICATION_CREDENTIALS` (or `FIRESTORE_CREDENTIALS_JSON`)
+- `DISCORD_BOT_TOKEN` (unchanged)
+- `DISCORD_ALLOWED_USERS` (unchanged)
 
-## 4. Error handling
-
-| Exception | When |
-|---|---|
-| `ProcessedStoreAuthError` | Token missing, invalid, or base not granted. Surface & stop. |
-| `ProcessedStoreNotFoundError` | Base/table missing, or `update_side_effects` for an unknown hash. |
-| `ProcessedStoreConflictError` | Schema mismatch / bad payload. Stop and inspect. |
-| `ProcessedStoreError` | All other failures (after 3 retries with 1s/2s/4s backoff). |
-
-Wrap each pipeline's main loop in a try/except for `ProcessedStoreError`
-and decide whether to fail the run or skip the item — the ledger is
-designed so a single bad row never breaks the batch.
+Legacy `AIRTABLE_*` env vars are no longer read by the ledger.
 
 ## 5. Testing
 
 ```bash
-# Offline tests (no token required) — 26 tests, ~4s
+# Offline tests (no GCP credentials) — uses in-memory backend
 python3 -m pytest pipeline/tests/test_processed_store.py -v
 
-# Live tests (writes to a real base — needs PIPELINE_TEST_BASE_ID + AIRTABLE_API_KEY)
-PIPELINE_TEST_BASE_ID=app_xxx \
-  python3 -m pytest pipeline/tests/test_processed_store.py::TestLiveAirtable -v
+# Live Firestore tests
+FIRESTORE_PROJECT_ID=your-project \
+  python3 -m pytest pipeline/tests/test_processed_store.py::TestLiveFirestore -v
 ```
 
-## 6. What this module does NOT do
+## 6. Collections
 
-- It does **not** push to Discord or GitHub — that's the caller's job.
-  It only stores the IDs once the caller has them.
-- It does **not** migrate the existing `state/*.json` files. That's a
-  separate task (Task 4 in the original plan).
-- It does **not** create Airtable views. Make them in the UI once.
-
-## 7. Open questions for PM
-
-- Do we want a "soft delete" flag column? (Not in current schema.)
-- Should `metadata` enforce a JSON shape per source_type, or stay free-form?
-- Should the daily runs use one ProcessedStore per source_type, or one
-  shared instance? (Current API supports both; recommend one shared.)
+| Legacy Airtable table | Firestore collection | Document id |
+|-----------------------|----------------------|-------------|
+| ProcessedContent | `processed` | `source_hash` |
+| ReactionPicks | `reactions` | `reaction_id` |
