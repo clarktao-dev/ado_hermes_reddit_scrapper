@@ -19,9 +19,14 @@ import argparse
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Repo root — same pattern as setup_firestore.py / migrate_airtable_to_firestore.py.
+# ``from pipeline.lib...`` requires the parent of the ``pipeline/`` package
+# on sys.path, not ``pipeline/`` itself (cwd-independent for cron).
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
 
 import requests
 

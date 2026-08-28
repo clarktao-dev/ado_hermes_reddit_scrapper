@@ -71,7 +71,8 @@ def main() -> int:
     print(f"processed collection readable (sample count={count})")
 
     if args.write_probe:
-        probe_id = "__firestore_setup_probe__"
+        # Firestore rejects document IDs starting with "__" (reserved).
+        probe_id = "setup_probe_tmp"
         processed.document(probe_id).set({"probe": True})
         processed.document(probe_id).delete()
         print("write-probe: OK (document written and deleted)")
