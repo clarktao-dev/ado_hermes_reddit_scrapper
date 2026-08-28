@@ -4,9 +4,9 @@
 Steps (Task 7 short-first default, 2026-08-09):
   1. load_config (channels.json)
   2. youtube_fetch   — pick N channels (round-robin by day-of-year) → newest video each
-  3. ProcessedStore  — Airtable ledger is the single source of truth for dedup.
+  3. ProcessedStore  — Firestore ledger is the single source of truth for dedup.
 state.json is **deprecated** but still read for backward-compat (so existing
-processed_ids aren't re-processed). New marks go to Airtable, not state.json.
+processed_ids aren't re-processed). New marks go to the ledger, not state.json.
   4a. ``--mode short`` (default): Google translate chunks → ONE lightweight LLM
       call → 200-char summary + bullets + 1-2 sentence view. Saves ~25-30% of
       long-form tokens. Vault filename: ``<slug>_summary.md``. Writes
@@ -26,7 +26,7 @@ Long-form is on-demand via ``pipeline/scripts/recommend_long_form.py confirm``.
 Run:
   python3 youtube_daily.py                # default short mode
   python3 youtube_daily.py --mode long    # full long-form Map-Reduce
-  python3 youtube_daily.py --dry-run      # no Discord, no GitHub, no mark_processed
+  python3 youtube_daily.py --dry-run      # fetch + translate only; no vault / Discord / GitHub / ledger
   python3 youtube_daily.py --channels '1alage,marktcheck'
 """
 from __future__ import annotations
@@ -432,7 +432,7 @@ def pick_video_for_channel(
         # Primary check: Airtable ledger.
         if store.is_processed("youtube", m.id):
             logger.info(
-                "skip already-processed (airtable): %s | %s",
+                "skip already-processed (ledger): %s | %s",
                 channel["id"], m.id,
             )
             continue
@@ -594,7 +594,9 @@ def _build_short_digest(video, translated_text: str, t0: float) -> youtube_trans
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
-                    help="Fetch + translate + write vault, but skip Discord and GitHub push")
+                    help="Fetch + translate only. Skip vault writes, transcript "
+                         "cache persistence, Discord, GitHub push, and ledger "
+                         "marks.")
     ap.add_argument("--mode", choices=("short", "long"), default="short",
                     help="Pipeline output mode. ``short`` (default) emits a "
                          "compact 200-char + 5 bullets + 1-2 sentence view "
@@ -730,7 +732,7 @@ def main() -> int:
         tr = None
         while v is not None:
             print(f"  [fetch] {v.id} | {v.title[:60]} ({v.duration_sec}s)")
-            tr = youtube_fetch.fetch_transcript(v)
+            tr = youtube_fetch.fetch_transcript(v, write_cache=not args.dry_run)
             if tr.text:
                 break  # got a usable transcript
             print(f"  [warn] empty transcript (lang={tr.language}); "
@@ -767,15 +769,26 @@ def main() -> int:
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     content_kind = "short-summary" if args.mode == "short" else "longform"
     vault_root = str(VAULT_ROOT)
-    vault_summary = youtube_obsidian.step_write_vault(
-        digests, repo_root=vault_root,
-        date_str=today_str,
-        wipe=True,
-        content_kind=content_kind,
-    )
-    print(f"  wrote {vault_summary.get('n_files', 0)} files, "
-          f"errors={vault_summary.get('n_errors', 0)} "
-          f"(kind={vault_summary.get('content_kind')})")
+    if args.dry_run:
+        vault_summary = {
+            "n_files": 0,
+            "n_errors": 0,
+            "content_kind": content_kind,
+            "dry_run": True,
+        }
+        print("  [dry-run] skipping vault write "
+              f"(would write {len(digests)} digest(s) under "
+              f"podcast-kb/vault/Daily/{today_str}/)")
+    else:
+        vault_summary = youtube_obsidian.step_write_vault(
+            digests, repo_root=vault_root,
+            date_str=today_str,
+            wipe=True,
+            content_kind=content_kind,
+        )
+        print(f"  wrote {vault_summary.get('n_files', 0)} files, "
+              f"errors={vault_summary.get('n_errors', 0)} "
+              f"(kind={vault_summary.get('content_kind')})")
 
     print(f"\n=== Step 6: send_discord ===")
     discord_summary = youtube_discord.step_send_discord(
@@ -796,7 +809,7 @@ def main() -> int:
     # Step 8: ledger writes
     # ------------------------------------------------------------------
     # Order matters:
-    #   1. mark_processed() (no side effects yet) → Airtable ledger is the
+    #   1. mark_processed() (no side effects yet) → ledger is the
     #      authoritative record of "this video was processed". Failure here
     #      is fatal: we lose dedup safety.
     #   2. update_side_effects() — best-effort. Failure here means the
