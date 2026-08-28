@@ -1,31 +1,34 @@
 #!/usr/bin/env python3
-"""Push vault markdown to GitHub via paramiko (bypasses @-mangle).
+"""Push vault markdown to GitHub.
 
-Only the vault collection repo is pushed (``HERMES_VAULT_ROOT``). Stage
-``podcast-kb/vault/`` or ``immobilien-kb/vault/`` in the daily pipelines
-before calling this script — never ``podcast-kb/content/``.
+Primary path: ``git push`` from ``HERMES_VAULT_ROOT`` (SSH deploy key).
+Fallback: dulwich + paramiko wire protocol (legacy @-mangle bypass).
+
+Only the vault collection repo is pushed. Stage ``podcast-kb/vault/`` or
+``immobilien-kb/vault/`` in the daily pipelines before calling this script —
+never ``podcast-kb/content/``.
 
 Usage:
     python3 push_to_github.py --scope podcast
     python3 push_to_github.py --scope immobilien
+
+Environment:
+    HERMES_PUSH_PREFER_GIT=1   Try ``git push`` first (default).
+    HERMES_PUSH_PREFER_GIT=0   Try paramiko first, then ``git push``.
 """
 from __future__ import annotations
 
 import argparse
 import io
 import os
+import subprocess
 import sys
 from pathlib import Path
+from typing import Callable
 
 _REPO_ROOT = Path(__file__).resolve().parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-
-sys.path.insert(0, "/root/.hermes/hermes-agent/venv/lib/python3.11/site-packages")
-
-import paramiko  # noqa: E402
-from dulwich.pack import write_pack_objects  # noqa: E402
-from dulwich.repo import Repo  # noqa: E402
 
 from pipeline.lib.paths import (  # noqa: E402
     IMMO_VAULT_GIT_PATH,
@@ -38,6 +41,38 @@ SCOPES = {
     "podcast": PODCAST_VAULT_GIT_PATH,
     "immobilien": IMMO_VAULT_GIT_PATH,
 }
+
+
+def _ssh_key_path() -> str:
+    return os.environ.get(
+        "HERMES_VAULT_GITHUB_KEY_PATH",
+        os.environ.get("HERMES_PIPELINE_GITHUB_KEY_PATH", "/root/.ssh/ado_reddit_deploy"),
+    )
+
+
+def push_via_git(
+    repo_dir: str,
+    branch: str = "main",
+    remote: str = "origin",
+    timeout: int = 120,
+) -> tuple[bool, str]:
+    """Push using the system git CLI and SSH deploy key."""
+    env = os.environ.copy()
+    key_path = _ssh_key_path()
+    if key_path and Path(key_path).exists():
+        env["GIT_SSH_COMMAND"] = (
+            f"ssh -i {key_path} -o IdentitiesOnly=yes "
+            f"-o StrictHostKeyChecking=accept-new"
+        )
+    proc = subprocess.run(
+        ["git", "-C", repo_dir, "push", remote, branch],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+    output = "".join(part for part in (proc.stdout, proc.stderr) if part)
+    return proc.returncode == 0, output.strip()
 
 
 def recv_exact(sock, n, timeout=30):
@@ -64,6 +99,10 @@ def read_pkt_line(chan):
 
 
 def build_pack(repo_dir):
+    sys.path.insert(0, "/root/.hermes/hermes-agent/venv/lib/python3.11/site-packages")
+    from dulwich.pack import write_pack_objects
+    from dulwich.repo import Repo
+
     repo = Repo(repo_dir)
     head_sha = repo.refs[b"refs/heads/main"]
     seen = set()
@@ -95,44 +134,34 @@ def build_pack(repo_dir):
     return buf.getvalue(), head_sha
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Push vault repo to GitHub")
-    parser.add_argument(
-        "--scope",
-        choices=sorted(SCOPES),
-        required=True,
-        help="Vault subtree that was staged (podcast-kb/vault or immobilien-kb/vault)",
-    )
-    args = parser.parse_args()
+def push_via_paramiko(
+    repo_dir: str,
+    owner: str,
+    repo: str,
+    branch: str = "main",
+) -> tuple[bool, str]:
+    """Legacy dulwich + paramiko push (bypasses @-mangle on some hosts)."""
+    sys.path.insert(0, "/root/.hermes/hermes-agent/venv/lib/python3.11/site-packages")
+    import paramiko
 
-    repo_dir = str(github_vault_repo_dir())
-    owner = os.environ.get("HERMES_VAULT_GITHUB_OWNER", "clarktao-dev")
-    repo = github_vault_repo()
-    key_path = os.environ.get(
-        "HERMES_VAULT_GITHUB_KEY_PATH",
-        os.environ.get("HERMES_PIPELINE_GITHUB_KEY_PATH", "/root/.ssh/ado_reddit_deploy"),
-    )
-    username = "git"
-    branch = os.environ.get("HERMES_VAULT_GITHUB_BRANCH", "main")
-    vault_subpath = SCOPES[args.scope]
-
-    print(f"[config] repo_dir={repo_dir} remote={owner}/{repo} scope={vault_subpath}")
-
+    key_path = _ssh_key_path()
     pack, head_sha = build_pack(repo_dir)
-    print(f"[pack] {len(pack)} bytes, head={head_sha.decode()[:12]}")
+    lines = [f"[pack] {len(pack)} bytes, head={head_sha.decode()[:12]}"]
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     pkey = paramiko.Ed25519Key.from_private_key_file(key_path)
-    client.connect("github.com", 22, username, pkey=pkey,
-                   look_for_keys=False, allow_agent=False)
-    print(f"[ssh] connected to github.com:22 as {username}")
+    client.connect(
+        "github.com", 22, "git", pkey=pkey,
+        look_for_keys=False, allow_agent=False,
+    )
+    lines.append("[ssh] connected to github.com:22 as git")
 
     chan = client.get_transport().open_session()
     chan.settimeout(60)
     cmd = f"git-receive-pack '{owner}/{repo}'"
     chan.exec_command(cmd)
-    print(f"[ssh] exec: {cmd}")
+    lines.append(f"[ssh] exec: {cmd}")
 
     all_lines = []
     init = read_pkt_line(chan)
@@ -156,7 +185,7 @@ def main():
             name = rest.rstrip(b"\n").strip().decode()
         if name:
             remote_refs[name] = sha
-    print(f"[refs] {remote_refs}")
+    lines.append(f"[refs] {remote_refs}")
 
     old_sha = remote_refs.get(f"refs/heads/{branch}", "0" * 40)
     new_sha = head_sha.decode()
@@ -164,11 +193,11 @@ def main():
     pkt_len = len(newline) + 4
     chan.sendall(("%04x" % pkt_len).encode() + newline)
     chan.sendall(b"0000")
-    print(f"[push] {old_sha[:7]} -> {new_sha[:7]} on refs/heads/{branch}")
+    lines.append(f"[push] {old_sha[:7]} -> {new_sha[:7]} on refs/heads/{branch}")
 
     chan.sendall(pack)
     chan.sendall(b"0000")
-    print("[push] pack streamed")
+    lines.append("[push] pack streamed")
 
     full = b""
     try:
@@ -184,9 +213,70 @@ def main():
     client.close()
 
     response = full.decode(errors="replace")
-    print(f"[result]\n{response}")
-
+    lines.append(f"[result]\n{response}")
     ok = "unpack ok" in response and f"ok refs/heads/{branch}" in response
+    return ok, "\n".join(lines)
+
+
+def push_vault(
+    repo_dir: str,
+    owner: str,
+    repo: str,
+    branch: str = "main",
+    *,
+    prefer_git: bool | None = None,
+) -> tuple[bool, str]:
+    """Try git CLI and/or paramiko until one succeeds."""
+    if prefer_git is None:
+        prefer_git = os.environ.get("HERMES_PUSH_PREFER_GIT", "1") != "0"
+
+    methods: list[tuple[str, Callable[[], tuple[bool, str]]]] = []
+    if prefer_git:
+        methods.append(("git", lambda: push_via_git(repo_dir, branch)))
+        methods.append(("paramiko", lambda: push_via_paramiko(repo_dir, owner, repo, branch)))
+    else:
+        methods.append(("paramiko", lambda: push_via_paramiko(repo_dir, owner, repo, branch)))
+        methods.append(("git", lambda: push_via_git(repo_dir, branch)))
+
+    log_parts: list[str] = []
+    for name, fn in methods:
+        log_parts.append(f"[push] trying {name}...")
+        try:
+            ok, output = fn()
+        except Exception as exc:  # noqa: BLE001 — collect and try fallback
+            ok, output = False, f"{type(exc).__name__}: {exc}"
+        log_parts.append(output)
+        if ok:
+            log_parts.append(f"[push] {name} succeeded")
+            return True, "\n".join(log_parts)
+        log_parts.append(f"[push] {name} failed")
+
+    return False, "\n".join(log_parts)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Push vault repo to GitHub")
+    parser.add_argument(
+        "--scope",
+        choices=sorted(SCOPES),
+        required=True,
+        help="Vault subtree that was staged (podcast-kb/vault or immobilien-kb/vault)",
+    )
+    args = parser.parse_args()
+
+    repo_dir = str(github_vault_repo_dir())
+    owner = os.environ.get("HERMES_VAULT_GITHUB_OWNER", "clarktao-dev")
+    repo = github_vault_repo()
+    branch = os.environ.get("HERMES_VAULT_GITHUB_BRANCH", "main")
+    vault_subpath = SCOPES[args.scope]
+
+    print(
+        f"[config] repo_dir={repo_dir} remote={owner}/{repo} "
+        f"scope={vault_subpath} branch={branch}"
+    )
+
+    ok, output = push_vault(repo_dir, owner, repo, branch)
+    print(output)
     return 0 if ok else 1
 
 
