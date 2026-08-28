@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from unittest import mock
 
+import pytest
+
 import push_to_github as ptg
 
 
@@ -60,3 +62,22 @@ def test_push_vault_returns_false_when_both_fail() -> None:
     assert ok is False
     assert "git failed" in output
     assert "paramiko failed" in output
+
+
+def test_ssh_key_path_explicit_vault_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERMES_VAULT_GITHUB_KEY_PATH", "/custom/vault-key")
+    assert ptg._ssh_key_path() == "/custom/vault-key"
+
+
+def test_ssh_key_path_user_key_when_vault_split(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HERMES_VAULT_GITHUB_KEY_PATH", raising=False)
+    monkeypatch.delenv("HERMES_PIPELINE_GITHUB_KEY_PATH", raising=False)
+    monkeypatch.setenv("HERMES_VAULT_ROOT", "/root/projects/hermes_vault_collection")
+    assert ptg._ssh_key_path() == "/root/.ssh/github_deploy_key"
+
+
+def test_ssh_key_path_mono_repo_deploy_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HERMES_VAULT_GITHUB_KEY_PATH", raising=False)
+    monkeypatch.delenv("HERMES_PIPELINE_GITHUB_KEY_PATH", raising=False)
+    monkeypatch.delenv("HERMES_VAULT_ROOT", raising=False)
+    assert ptg._ssh_key_path() == "/root/.ssh/ado_reddit_deploy"

@@ -44,10 +44,24 @@ SCOPES = {
 
 
 def _ssh_key_path() -> str:
-    return os.environ.get(
-        "HERMES_VAULT_GITHUB_KEY_PATH",
-        os.environ.get("HERMES_PIPELINE_GITHUB_KEY_PATH", "/root/.ssh/ado_reddit_deploy"),
-    )
+    """SSH private key for vault-repo pushes.
+
+    Priority:
+      1. ``HERMES_VAULT_GITHUB_KEY_PATH`` (explicit vault key)
+      2. ``HERMES_PIPELINE_GITHUB_KEY_PATH`` (shared override)
+      3. When ``HERMES_VAULT_ROOT`` is set: user-level ``github_deploy_key``
+         (``ado_reddit_deploy`` is scoped to the code repo deploy key only)
+      4. Mono-repo fallback: ``ado_reddit_deploy``
+    """
+    explicit = os.environ.get("HERMES_VAULT_GITHUB_KEY_PATH")
+    if explicit:
+        return explicit
+    pipeline_key = os.environ.get("HERMES_PIPELINE_GITHUB_KEY_PATH")
+    if pipeline_key:
+        return pipeline_key
+    if os.environ.get("HERMES_VAULT_ROOT"):
+        return "/root/.ssh/github_deploy_key"
+    return "/root/.ssh/ado_reddit_deploy"
 
 
 def push_via_git(
