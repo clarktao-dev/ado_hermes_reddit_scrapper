@@ -297,17 +297,20 @@ def list_channel_videos(channel_id: str, channel_name: str, channel_url: str,
 
 
 def fetch_transcript(video: VideoMeta, timeout: int = 30,
-                     max_chars: int = 200_000) -> TranscriptResult:
-    """Fetch transcript via kome.ai, then persist to the transcript cache.
+                     max_chars: int = 200_000,
+                     write_cache: bool = True) -> TranscriptResult:
+    """Fetch transcript via kome.ai, optionally persist to the transcript cache.
 
     The cache (immobilien-kb/vault/YouTube/<Channel>/_transcripts/<video_id>.md)
     is the source of truth for long-form re-runs within the 30-day TTL window —
     see ``pipeline.lib.transcript_cache`` for the cleanup contract.
 
     If the cache already has a non-expired entry for this video, return it
-    directly without hitting kome.ai. Returns text='' / language='none' when
-    both the network call and the cache miss — the caller decides whether
-    to skip the video or fall back to a YouTube HTML scrape.
+    directly without hitting kome.ai. Set ``write_cache=False`` (e.g. from
+    ``youtube_daily --dry-run``) to fetch without persisting new cache files.
+    Returns text='' / language='none' when both the network call and the cache
+    miss — the caller decides whether to skip the video or fall back to a
+    YouTube HTML scrape.
     """
     # Cheap check first: if a fresh cached transcript exists, use it.
     try:
@@ -344,17 +347,18 @@ def fetch_transcript(video: VideoMeta, timeout: int = 30,
     # kome.ai returns language based on what YouTube has; we don't need to detect it
     truncated = text[:max_chars]
     # Persist to the transcript cache so long-form re-runs can skip kome.ai.
-    try:
-        from pipeline.lib import transcript_cache
-        transcript_cache.write_transcript(
-            channel=video.channel_name,
-            video_id=video.id,
-            text=truncated,
-            language="auto",
-            source="kome.ai",
-        )
-    except Exception as e:  # noqa: BLE001 — cache write failure is non-fatal
-        logger.warning("transcript cache write failed for %s: %s", video.id, e)
+    if write_cache:
+        try:
+            from pipeline.lib import transcript_cache
+            transcript_cache.write_transcript(
+                channel=video.channel_name,
+                video_id=video.id,
+                text=truncated,
+                language="auto",
+                source="kome.ai",
+            )
+        except Exception as e:  # noqa: BLE001 — cache write failure is non-fatal
+            logger.warning("transcript cache write failed for %s: %s", video.id, e)
     return TranscriptResult(
         video=video,
         language="auto",
