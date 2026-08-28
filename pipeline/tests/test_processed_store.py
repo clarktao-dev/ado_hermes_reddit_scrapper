@@ -299,7 +299,15 @@ class TestSideEffects:
 # ---------------------------------------------------------------------------
 
 class TestAuthAndRetry:
-    def test_missing_credentials_raises_auth_error(self) -> None:
+    def test_missing_credentials_raises_auth_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for key in (
+            "FIRESTORE_PROJECT_ID",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "FIRESTORE_CREDENTIALS_JSON",
+        ):
+            monkeypatch.delenv(key, raising=False)
         s = ProcessedStore("appX")
         with pytest.raises(ProcessedStoreAuthError):
             s.is_processed("youtube", "x")

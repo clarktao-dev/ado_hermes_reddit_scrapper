@@ -1,0 +1,19 @@
+[Unit]
+Description=Discord Reaction Picks Daemon (Firestore)
+Documentation=file:/root/projects/ado_hermes_reddit_scrapper/pipeline/lib/discord_picks.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/root/.hermes/.env
+WorkingDirectory=/root/projects/ado_hermes_reddit_scrapper
+ExecStart=/root/.hermes/hermes-agent/venv/bin/python3 pipeline/lib/discord_picks.py
+Restart=always
+RestartSec=15
+StandardOutput=append:/var/log/discord_picks.log
+StandardError=append:/var/log/discord_picks.log
+
+[Install]
+WantedBy=multi-user.target
