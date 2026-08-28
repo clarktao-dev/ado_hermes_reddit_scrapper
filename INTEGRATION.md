@@ -121,10 +121,19 @@ Add to ``~/.hermes/.env`` (Phase 2b, after merging this PR):
 ```bash
 PIPELINE_ROOT=/root/projects/ado_hermes_reddit_scrapper
 HERMES_VAULT_ROOT=/root/projects/hermes_vault_collection
+# SSH key for vault-repo pushes (required on VPS if ado_reddit_deploy is
+# scoped to the code repo deploy key only):
+HERMES_VAULT_GITHUB_KEY_PATH=/root/.ssh/github_deploy_key
 # optional overrides (defaults shown):
 # HERMES_VAULT_GITHUB_REPO=hermes_vault_collection
 # HERMES_VAULT_GITHUB_OWNER=clarktao-dev
 ```
+
+**SSH keys:** ``/root/.ssh/ado_reddit_deploy`` is a deploy key for
+``ado_hermes_reddit_scrapper`` only. Pushing ``hermes_vault_collection``
+requires either ``HERMES_VAULT_GITHUB_KEY_PATH`` (user-level key or a
+vault-specific deploy key) or the default ``github_deploy_key`` when
+``HERMES_VAULT_ROOT`` is set.
 
 Path resolution is centralised in ``pipeline/lib/paths.py``. When
 ``HERMES_VAULT_ROOT`` is unset, ``VAULT_ROOT`` falls back to
