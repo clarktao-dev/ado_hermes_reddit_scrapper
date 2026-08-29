@@ -213,6 +213,53 @@ def _list_via_invidious(channel: dict, limit: int = 10) -> List[VideoMeta]:
     raise RuntimeError(f"All Invidious instances failed for {canonical_id}")
 
 
+def fetch_video_meta_via_invidious(video_id: str) -> Optional[VideoMeta]:
+    """Fetch metadata for a single video via Invidious ``/api/v1/videos/{id}``.
+
+    Used when yt-dlp is unavailable (no JS runtime on VPS). Tries each
+    instance in ``INVIDIOUS_INSTANCES`` in order; returns on first success.
+    """
+    for instance in INVIDIOUS_INSTANCES:
+        try:
+            url = f"{instance}/api/v1/videos/{video_id}"
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; hermes-youtube-fetch/1.0)"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            length = data.get("lengthSeconds")
+            try:
+                duration_sec = int(length) if length is not None else 0
+            except (TypeError, ValueError):
+                duration_sec = 0
+            published = data.get("published")
+            try:
+                epoch = int(published) if published is not None else None
+            except (TypeError, ValueError):
+                epoch = None
+            logger.info(
+                "invidious: resolved video %s via %s (%s)",
+                video_id, instance, data.get("title", "")[:60],
+            )
+            return VideoMeta(
+                id=video_id,
+                title=data.get("title", ""),
+                duration_sec=duration_sec,
+                epoch=epoch,
+                url=f"https://www.youtube.com/watch?v={video_id}",
+                channel_id=data.get("authorId") or "",
+                channel_name=data.get("author") or "",
+                view_count=data.get("viewCount"),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "invidious %s failed for video %s: %s", instance, video_id, e,
+            )
+            continue
+    return None
+
+
 def _list_via_ytdlp_inline(channel_id: str, channel_name: str, channel_url: str,
                             limit: int, youtube_channel_id: Optional[str]) -> List[VideoMeta]:
     """Legacy yt-dlp + YouTube-RSS fallback. Inlined to avoid signature drift.

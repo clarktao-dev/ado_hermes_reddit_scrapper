@@ -87,7 +87,19 @@ def load_channels() -> list:
 
 # LLM sampling for short-mode structuring. Lower temperature reduces
 # placeholder/stub hallucinations (Hermes 2026-08-29: 0.7 → 0.3).
-SHORT_LLM_TEMPERATURE = 0.3
+# Override per-run: YOUTUBE_SHORT_LLM_TEMPERATURE=0.0 (e.g. force re-run).
+def _short_llm_temperature() -> float:
+    raw = os.environ.get("YOUTUBE_SHORT_LLM_TEMPERATURE", "0.3")
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "invalid YOUTUBE_SHORT_LLM_TEMPERATURE=%r; using 0.3", raw,
+        )
+        return 0.3
+
+
+SHORT_LLM_TEMPERATURE = _short_llm_temperature()
 # Initial call + up to 2 anti-stub retries (3 LLM calls max).
 SHORT_STUB_MAX_ATTEMPTS = 3
 
@@ -736,6 +748,8 @@ def main() -> int:
                         "FORCE: re-processing already-processed video %s",
                         forced_video.id,
                     )
+                    v = forced_video
+                    candidates = [forced_video]
                 else:
                     logger.info(
                         "skip already-processed: %s", forced_video.id,
@@ -744,6 +758,7 @@ def main() -> int:
                     v = None
             else:
                 v = forced_video
+                candidates = [forced_video]
                 logger.info("using forced video: %s", v.id)
         elif store is not None:
             candidates = pick_video_for_channel(
@@ -932,10 +947,10 @@ def _legacy_pick(channel: dict, state: youtube_state.StateStore,
 
 
 def _force_fetch_video_meta(video_id: str) -> youtube_fetch.VideoMeta | None:
-    """Look up a single video's metadata via yt-dlp --dump-single-json.
+    """Look up a single video's metadata for ``--video-id`` override.
 
-    Used for --video-id override (testing / re-processing). Returns a VideoMeta
-    stub if the id is a known YouTube 11-char id and yt-dlp can resolve it.
+    Tries yt-dlp ``--dump-single-json`` first; falls back to Invidious when
+    yt-dlp is unavailable (VPS without JS runtime).
     """
     import re as _re
     if not _re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
@@ -946,38 +961,45 @@ def _force_fetch_video_meta(video_id: str) -> youtube_fetch.VideoMeta | None:
         ["yt-dlp", "--dump-single-json", "--skip-download", url],
         capture_output=True, text=True, timeout=30,
     )
-    if proc.returncode != 0:
-        logger.error("yt-dlp --dump-single-json failed: %s", proc.stderr[:300])
-        return None
-    try:
-        d = json.loads(proc.stdout)
-    except json.JSONDecodeError as e:
-        logger.error("yt-dlp output not JSON: %s", e)
-        return None
-    epoch = (
-        d.get("release_timestamp")
-        or d.get("timestamp")
-        or d.get("upload_date")
-    )
-    if isinstance(epoch, str):
-        # upload_date is YYYYMMDD
+    if proc.returncode == 0:
         try:
-            from datetime import datetime as _dt
-            epoch = int(_dt.strptime(epoch, "%Y%m%d").replace(
-                tzinfo=timezone.utc).timestamp())
-        except ValueError:
-            epoch = None
-    elif isinstance(epoch, (int, float)):
-        epoch = int(epoch)
-    return youtube_fetch.VideoMeta(
-        id=video_id,
-        title=d.get("title", ""),
-        duration_sec=int(d.get("duration") or 0),
-        epoch=epoch,
-        url=d.get("webpage_url") or url,
-        channel_id=d.get("channel_id") or d.get("uploader_id") or "",
-        channel_name=d.get("channel") or d.get("uploader") or "",
-    )
+            d = json.loads(proc.stdout)
+        except json.JSONDecodeError as e:
+            logger.error("yt-dlp output not JSON: %s", e)
+        else:
+            epoch = (
+                d.get("release_timestamp")
+                or d.get("timestamp")
+                or d.get("upload_date")
+            )
+            if isinstance(epoch, str):
+                try:
+                    from datetime import datetime as _dt
+                    epoch = int(_dt.strptime(epoch, "%Y%m%d").replace(
+                        tzinfo=timezone.utc).timestamp())
+                except ValueError:
+                    epoch = None
+            elif isinstance(epoch, (int, float)):
+                epoch = int(epoch)
+            return youtube_fetch.VideoMeta(
+                id=video_id,
+                title=d.get("title", ""),
+                duration_sec=int(d.get("duration") or 0),
+                epoch=epoch,
+                url=d.get("webpage_url") or url,
+                channel_id=d.get("channel_id") or d.get("uploader_id") or "",
+                channel_name=d.get("channel") or d.get("uploader") or "",
+            )
+    else:
+        logger.warning(
+            "yt-dlp --dump-single-json failed for %s: %s",
+            video_id, proc.stderr[:300],
+        )
+    meta = youtube_fetch.fetch_video_meta_via_invidious(video_id)
+    if meta is not None:
+        return meta
+    logger.error("could not resolve video metadata for %s", video_id)
+    return None
 
 
 if __name__ == "__main__":
