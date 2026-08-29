@@ -85,45 +85,34 @@ def load_channels() -> list:
     return [c for c in data.get("channels", []) if c.get("enabled", True)]
 
 
-# Persistent run counter for round-robin channel rotation (Task 9).
-# Stored as a plain text file so the counter survives across runs in the
-# same week, regardless of whether the run is cron-triggered or manual.
-RUN_COUNTER_PATH = "/tmp/youtube_daily_run_count"
-
-
-def _read_run_counter() -> int:
-    """Return the previous run count, or 0 if the file is missing/corrupt."""
-    try:
-        return int(Path(RUN_COUNTER_PATH).read_text().strip() or "0")
-    except (FileNotFoundError, ValueError):
-        return 0
-
-
-def _write_run_counter(n: int) -> None:
-    Path(RUN_COUNTER_PATH).write_text(str(n))
+# LLM sampling for short-mode structuring. Lower temperature reduces
+# placeholder/stub hallucinations (Hermes 2026-08-29: 0.7 → 0.3).
+SHORT_LLM_TEMPERATURE = 0.3
+# Initial call + up to 2 anti-stub retries (3 LLM calls max).
+SHORT_STUB_MAX_ATTEMPTS = 3
 
 
 def pick_channels(channels: list, n: int = 4) -> list:
-    """Round-robin by run count: pick n consecutive channels starting at
-    (run_count % len(channels)). This rotates every time the pipeline runs
-    (not just every day), so running twice in the same day hits different
-    channels than the first run.
+    """Round-robin by UTC day-of-year: pick n consecutive channels starting at
+    (today.doy % len(channels)).
+
+    Deterministic per calendar day — manual re-runs and cron both pick the
+    same channels on the same UTC date. With 19 enabled channels and n=4,
+    every channel is covered every 5 days (19 / 4 ≈ 5).
 
     n default was 3 (2026-08-08); bumped to 4 on 2026-08-24 because ex_makler
-    has 22 zombie/unprocessed videos (state.json false positives — see
-    commit 4da1c72) and 3-channel cadence would take 6+ days to clear one
-    channel. 4-channel cadence brings total wall-clock to ~7 min vs ~5 min
-    at n=3, well within ollama-cloud's hang threshold (<8 sequential LLM
-    calls in tight loop).
+    had zombie/unprocessed videos (state.json false positives — see
+    commit 4da1c72). 4-channel cadence stays within ollama-cloud's hang
+    threshold (<8 sequential LLM calls in tight loop).
 
-    The run counter is incremented and persisted after each call so the
-    next run starts from a different offset.
+    Reverted from run-counter rotation (Task 9, 2026-08-09) on 2026-08-29:
+    the /tmp counter drifted when manual runs advanced the offset, so cron
+    picked the wrong channels and expected daily slots were skipped entirely.
     """
     if n >= len(channels):
         return list(channels)
-    counter = _read_run_counter()
-    start = counter % len(channels)
-    _write_run_counter(counter + 1)
+    doy = datetime.now(timezone.utc).timetuple().tm_yday
+    start = doy % len(channels)
     return [channels[(start + i) % len(channels)] for i in range(n)]
 
 
@@ -254,14 +243,13 @@ def step_structure_short(video, translated_text: str,
     ``analyst_zh`` = bullets, ``producer_zh`` = 觀點; ``vocab_zh`` stays
     empty because vocabulary is a long-form affordance).
 
-    Anti-stub guard (2026-08-27):
+    Anti-stub guard (2026-08-27, extended 2026-08-29):
         If the LLM returns a stub summary ("影片因伺服器錯誤無法載入",
-        etc.) but the translated text actually contains content, retry ONCE
-        with a stricter user message that explicitly cites the input length
-        and forbids placeholder output. If the second attempt still looks
-        like a stub, downgrade to ``(內容待補)` placeholders so the vault
-        file is still produced (per the pipeline contract) but the user
-        can tell from Discord / vault that the digest needs manual review.
+        etc.) but the translated text actually contains content, retry up to
+        twice with progressively stricter prompts (hard refusal, then
+        "transcript is real — summarise directly"). After 3 failed attempts,
+        downgrade to ``(內容待補)` placeholders so the vault file is still
+        produced but Discord skips the degraded digest.
 
     Failure path: any LLM error → return empty strings so the caller can
     still write a vault file with `(無)` placeholders. We do not raise —
@@ -279,8 +267,17 @@ def step_structure_short(video, translated_text: str,
     text = _call_llm_short(user, llm_timeout=llm_timeout)
     if text is None:
         return {"summary_zh": "", "analyst_zh": "", "producer_zh": "", "vocab_zh": ""}
+    sections = _parse_short_llm_response(text)
+    if not _needs_stub_retry(sections, translated_text):
+        return sections
+    return _retry_or_downgrade_stub(
+        video, user, translated_text, sections, llm_timeout=llm_timeout,
+    )
+
+
+def _parse_short_llm_response(text: str) -> dict:
+    """OpenCC-normalise and split a short-mode LLM response."""
     text = text.strip()
-    # OpenCC belt-and-braces
     from pipeline.lib.translate import (  # noqa: PLC0415
         force_traditional,
         has_simplified,
@@ -288,66 +285,91 @@ def step_structure_short(video, translated_text: str,
     if has_simplified(text):
         fixed = force_traditional(text)
         text = fixed[0] if isinstance(fixed, tuple) else fixed
-    sections = _split_short_digest(text)
+    return _split_short_digest(text)
 
-    # ---- Output gate (anti-stub) --------------------------------------- #
-    # If the LLM hallucinated a placeholder even though we have real
-    # content, retry once with a hard refusal prompt. If the second attempt
-    # still stubs, downgrade cleanly so the user can tell from Discord /
-    # vault that the digest needs manual review.
+
+def _needs_stub_retry(sections: dict, translated_text: str) -> bool:
     from pipeline.lib import stub_detection  # noqa: PLC0415
-    summary = sections.get("summary_zh", "")
     has_real_input = bool(translated_text and translated_text.strip())
-    if has_real_input and stub_detection.is_stub_summary(summary):
-        reason_first = stub_detection.stub_reason(summary)
-        logger.warning(
-            "step_structure_short: stub detected (reason=%r) on first call "
-            "for video %s; retrying with hard refusal prompt",
-            reason_first, video.id,
-        )
-        retry_user = (
-            f"{user}\n\n---\n\n"
-            f"⚠️ 你上一個回應({reason_first!r})是 placeholder,違反規則。"
-            f"輸入逐字稿實際有 {len(translated_text)} 個字、實際有影片內容。"
+    return has_real_input and stub_detection.is_stub_summary(
+        sections.get("summary_zh", ""),
+    )
+
+
+def _build_stub_retry_user(base_user: str, translated_text: str,
+                           reason: str, attempt: int) -> str:
+    """Build progressively stricter retry prompts (attempt 1 or 2)."""
+    n_chars = len(translated_text)
+    if attempt == 1:
+        return (
+            f"{base_user}\n\n---\n\n"
+            f"⚠️ 你上一個回應({reason!r})是 placeholder,違反規則。"
+            f"輸入逐字稿實際有 {n_chars} 個字、實際有影片內容。"
             "請**只用**上面那段逐字稿寫「一句話摘要」(200 字以內、直接從影片主題切入),"
             "**禁止**寫「影片...無法...」「伺服器錯誤」「placeholder」這類字串。"
             "若你仍堅持要寫 placeholder,請回應 `__REFUSE__` 三個字就好。"
         )
-        text2 = _call_llm_short(retry_user, llm_timeout=llm_timeout)
-        if text2 is not None:
-            text2 = text2.strip()
-            if has_simplified(text2):
-                fixed = force_traditional(text2)
-                text2 = fixed[0] if isinstance(fixed, tuple) else fixed
-            if text2.strip() == "__REFUSE__":
-                logger.warning(
-                    "step_structure_short: LLM refused after stub-detection "
-                    "retry for video %s; downgrading to (內容待補)",
-                    video.id,
-                )
-            else:
-                sections2 = _split_short_digest(text2)
-                if not stub_detection.is_stub_summary(sections2.get("summary_zh", "")):
-                    logger.info(
-                        "step_structure_short: stub fixed on retry for video %s",
-                        video.id,
-                    )
-                    return sections2
-                logger.warning(
-                    "step_structure_short: stub STILL detected after retry "
-                    "(reason=%r) for video %s; downgrading to (內容待補)",
-                    stub_detection.stub_reason(sections2.get("summary_zh", "")),
-                    video.id,
-                )
-        # Fallthrough: downgrade to placeholder so the vault file is still
-        # produced but the user can see the digest needs manual review.
-        return {
-            "summary_zh": "(內容待補 — LLM 兩次都輸出 placeholder,需手動確認)",
-            "analyst_zh": "(無)",
-            "producer_zh": "(無 — 自動跳過)",
-            "vocab_zh": "",
-        }
-    return sections
+    return (
+        f"{base_user}\n\n---\n\n"
+        f"⚠️ 第三次機會:上面 {n_chars} 字的逐字稿**是真的**,來自 kome.ai 抓取,"
+        "不是錯誤頁、不是 placeholder。"
+        "**請直接摘要**影片主題與重點,從第一句就寫實質內容。"
+        "**絕對禁止**再輸出「伺服器錯誤」「無法載入」「無法取得」等字串。"
+        "若仍無法遵守,回應 `__REFUSE__`。"
+    )
+
+
+def _retry_or_downgrade_stub(video, base_user: str, translated_text: str,
+                             first_sections: dict,
+                             llm_timeout: int = 120) -> dict:
+    """Run anti-stub retries; downgrade to (內容待補) if all attempts fail."""
+    from pipeline.lib import stub_detection  # noqa: PLC0415
+    reason_first = stub_detection.stub_reason(first_sections.get("summary_zh", ""))
+    logger.warning(
+        "step_structure_short: stub detected (reason=%r) on first call "
+        "for video %s; retrying (up to %d more attempts)",
+        reason_first, video.id, SHORT_STUB_MAX_ATTEMPTS - 1,
+    )
+    for attempt in range(1, SHORT_STUB_MAX_ATTEMPTS):
+        retry_user = _build_stub_retry_user(
+            base_user, translated_text, reason_first, attempt,
+        )
+        text = _call_llm_short(retry_user, llm_timeout=llm_timeout)
+        if text is None:
+            logger.warning(
+                "step_structure_short: LLM call failed on stub retry %d "
+                "for video %s",
+                attempt, video.id,
+            )
+            continue
+        text = text.strip()
+        if text == "__REFUSE__":
+            logger.warning(
+                "step_structure_short: LLM refused on stub retry %d "
+                "for video %s; downgrading to (內容待補)",
+                attempt, video.id,
+            )
+            break
+        sections = _parse_short_llm_response(text)
+        if not stub_detection.is_stub_summary(sections.get("summary_zh", "")):
+            logger.info(
+                "step_structure_short: stub fixed on retry %d for video %s",
+                attempt, video.id,
+            )
+            return sections
+        logger.warning(
+            "step_structure_short: stub STILL detected after retry %d "
+            "(reason=%r) for video %s",
+            attempt,
+            stub_detection.stub_reason(sections.get("summary_zh", "")),
+            video.id,
+        )
+    return {
+        "summary_zh": "(內容待補 — LLM 三次都輸出 placeholder,需手動確認)",
+        "analyst_zh": "(無)",
+        "producer_zh": "(無 — 自動跳過)",
+        "vocab_zh": "",
+    }
 
 
 def _call_llm_short(user: str, llm_timeout: int) -> str | None:
@@ -362,7 +384,9 @@ def _call_llm_short(user: str, llm_timeout: int) -> str | None:
             {"role": "system", "content": SHORT_STRUCTURE_SYSTEM_PROMPT},
             {"role": "user", "content": user},
         ]
-        text, _usage = call(messages, timeout=llm_timeout)
+        text, _usage = call(
+            messages, timeout=llm_timeout, temperature=SHORT_LLM_TEMPERATURE,
+        )
         return text
     except Exception as e:  # noqa: BLE001
         logger.warning("step_structure_short: LLM call failed: %s", e)
@@ -518,9 +542,14 @@ def _video_output_md_path(repo_root: str, date_str: str, digest, content_kind: s
     return None
 
 
+def _is_stub_transcript(text: str) -> bool:
+    from pipeline.lib import stub_detection  # noqa: PLC0415
+    return stub_detection.is_stub_transcript(text)
+
+
 def _build_metadata(digest, video: youtube_fetch.VideoMeta,
                     channel: dict) -> dict:
-    return {
+    metadata = {
         "epoch": int(video.epoch) if video.epoch else None,
         "published_epoch": int(video.epoch) if video.epoch else None,
         "duration_sec": int(video.duration_sec),
@@ -533,6 +562,9 @@ def _build_metadata(digest, video: youtube_fetch.VideoMeta,
         "reduce_calls": int(digest.reduce_calls),
         "elapsed_sec": float(digest.elapsed_sec),
     }
+    if digest.summary_zh and "內容待補" in digest.summary_zh:
+        metadata["content_quality"] = "degraded"
+    return metadata
 
 
 def _translate_only(transcript_text: str, source: str = "de",
@@ -733,6 +765,13 @@ def main() -> int:
         while v is not None:
             print(f"  [fetch] {v.id} | {v.title[:60]} ({v.duration_sec}s)")
             tr = youtube_fetch.fetch_transcript(v, write_cache=not args.dry_run)
+            if tr.text and _is_stub_transcript(tr.text):
+                print(f"  [warn] stub transcript detected (error page HTML); "
+                      f"trying next candidate")
+                tr = youtube_fetch.TranscriptResult(
+                    video=v, language="none", text="", n_chars=0,
+                    is_premium=tr.is_premium,
+                )
             if tr.text:
                 break  # got a usable transcript
             print(f"  [warn] empty transcript (lang={tr.language}); "

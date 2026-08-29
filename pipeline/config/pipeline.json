@@ -3,7 +3,7 @@
   "ollama": {
     "base_url": "https://ollama.com/v1",
     "model": "deepseek-v4-flash:0731",
-    "temperature": 0.1
+    "temperature": 0.3
   },
   "discord": {
     "channel_alias": "headlines",

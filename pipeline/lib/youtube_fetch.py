@@ -317,13 +317,21 @@ def fetch_transcript(video: VideoMeta, timeout: int = 30,
         from pipeline.lib import transcript_cache
         cached = transcript_cache.read_cached_transcript(video.channel_name, video.id)
         if cached is not None:
-            return TranscriptResult(
-                video=video,
-                language=cached.language,
-                text=cached.text[:max_chars],
-                n_chars=min(cached.n_chars, max_chars),
-                is_premium=False,
-            )
+            from pipeline.lib import stub_detection
+            if stub_detection.is_stub_transcript(cached.text):
+                logger.warning(
+                    "cached transcript for %s looks like error-page stub; "
+                    "ignoring cache",
+                    video.id,
+                )
+            else:
+                return TranscriptResult(
+                    video=video,
+                    language=cached.language,
+                    text=cached.text[:max_chars],
+                    n_chars=min(cached.n_chars, max_chars),
+                    is_premium=False,
+                )
     except Exception:  # noqa: BLE001 — cache read is best-effort
         pass
 
@@ -340,6 +348,16 @@ def fetch_transcript(video: VideoMeta, timeout: int = 30,
     data = resp.json()
     text = (data.get("transcript") or "").strip()
     if not text:
+        return TranscriptResult(
+            video=video, language="none", text="", n_chars=0,
+            is_premium=bool(data.get("isPremium")),
+        )
+    from pipeline.lib import stub_detection
+    if stub_detection.is_stub_transcript(text):
+        logger.warning(
+            "kome.ai returned stub transcript for %s; treating as empty",
+            video.id,
+        )
         return TranscriptResult(
             video=video, language="none", text="", n_chars=0,
             is_premium=bool(data.get("isPremium")),

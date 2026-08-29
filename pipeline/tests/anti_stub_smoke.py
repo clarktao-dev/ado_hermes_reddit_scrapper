@@ -1,7 +1,7 @@
 """Mock-test the anti-stub guard in step_structure_short (no unittest.mock)."""
 import sys
 import pathlib
-sys.path.insert(0, str(pathlib.Path('/root/projects/ado_hermes_reddit_scrapper')))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from pipeline.youtube_daily import step_structure_short
 from pipeline.lib.youtube_fetch import VideoMeta
@@ -109,15 +109,16 @@ def case_2_stub_then_healthy():
     print("  ✓ PASS\n")
 
 
-def case_3_double_stub_downgrades():
-    print("Case 3: stub + stub → downgrade to (內容待補)")
-    mock = MockLLM([STUB_SUMMARY, STUB_SUMMARY])
+def case_3_triple_stub_downgrades():
+    print("Case 3: stub + stub + stub → downgrade to (內容待補) after 3 calls")
+    mock = MockLLM([STUB_SUMMARY, STUB_SUMMARY, STUB_SUMMARY])
     with _PatchStep(mock):
         out = step_structure_short(make_video(), GOOD_INPUT, llm_timeout=10)
     print(f"  call count: {len(mock.calls)}")
     print(f"  summary: {out['summary_zh']}")
-    assert len(mock.calls) == 2
+    assert len(mock.calls) == 3
     assert "內容待補" in out["summary_zh"], f"expected downgrade: {out['summary_zh']!r}"
+    assert "三次" in out["summary_zh"]
     assert out["analyst_zh"] == "(無)"
     print("  ✓ PASS\n")
 
@@ -170,13 +171,25 @@ def case_7_real_stub_marker():
     print("  ✓ PASS\n")
 
 
+def case_8_stub_stub_then_healthy():
+    print("Case 8: stub + stub + healthy → third attempt succeeds")
+    mock = MockLLM([STUB_SUMMARY, STUB_SUMMARY, HEALTHY_SUMMARY])
+    with _PatchStep(mock):
+        out = step_structure_short(make_video(), GOOD_INPUT, llm_timeout=10)
+    print(f"  call count: {len(mock.calls)}")
+    assert len(mock.calls) == 3
+    assert "位置比價格更重要" in out["summary_zh"]
+    print("  ✓ PASS\n")
+
+
 if __name__ == "__main__":
     case_1_healthy_first_try()
     case_2_stub_then_healthy()
-    case_3_double_stub_downgrades()
+    case_3_triple_stub_downgrades()
     case_4_refuse_marker()
     case_5_empty_input_no_retry()
     case_6_llm_error()
     case_7_real_stub_marker()
+    case_8_stub_stub_then_healthy()
     print("=" * 60)
-    print("ALL 7 CASES PASSED")
+    print("ALL 8 CASES PASSED")

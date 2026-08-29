@@ -16,6 +16,12 @@ DISCORD_SENDER = str(_DISCORD_SENDER_PATH)
 EMBED_MAX_CHARS = 4000  # Discord hard cap is 4096; leave a small safety margin
 
 
+def _is_degraded_digest(d) -> bool:
+    """Skip Discord push for LLM stub downgrades (content_quality=degraded)."""
+    summary = getattr(d, "summary_zh", "") or ""
+    return "內容待補" in summary
+
+
 def _send(channel: str, content: str, as_embed: bool = True, title: str = "",
           retries: int = 3) -> list:
     """Wrapper around discord_sender.py — returns list of message_ids on success.
@@ -126,6 +132,15 @@ def step_send_discord(digests, channel: str = "podcast",
     summary = {"n_embeds": 0, "errors": [], "channel": channel, "per_video": []}
 
     for d in digests:
+        if _is_degraded_digest(d):
+            summary["per_video"].append({
+                "video_id": d.video_id,
+                "title": d.title,
+                "n_embeds": 0,
+                "message_ids": [],
+                "skipped": "degraded",
+            })
+            continue
         body = _build_embed_body(d)
         chunks = _split_chunks(body)
         sent_for_video = 0
