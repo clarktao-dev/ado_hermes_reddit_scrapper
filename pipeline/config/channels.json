@@ -72,6 +72,15 @@
       "channel_id": "UCxt0EsAUIHo30aHOJgQOfJQ",
       "category": "real_estate",
       "enabled": true
+    },
+    {
+      "id": "limmo",
+      "name": "L'Immo (Haufe Immobilien Podcast)",
+      "url": "https://haufe-immobilienpodcast.podigee.io/feed/mp3",
+      "category": "real_estate",
+      "source_type": "podcast",
+      "enabled": true,
+      "_notes": "Plan 10 (2026-08-31): l'Immo stopped publishing on YouTube but still posts weekly on Haufe/Podigee. Apple Podcasts id=1494315229. Public RSS feed — no ASR needed (Podigee auto-publishes VTT+JSON transcripts for recent episodes)."
     }
   ],
   "_scheduling": {
