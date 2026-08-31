@@ -253,10 +253,32 @@ paywall_preview_kind: "{item.get('_paywall_preview_kind', '')}"
 def write_daily_index(items, vault_root, date_str, github_url):
     """Write a daily summary file: vault/Daily/YYYY-MM-DD/_index.md
     This is the file the GitHub push and Discord digest will reference.
+
+    Plan 9 (2026-08-31): defensive URL dedup before counting. The earlier
+    ``filter_processed`` step already enforces intra-batch dedup, but
+    this is a cheap belt-and-braces guarantee that the index's
+    ``total_items`` always matches the number of files written by
+    ``write_news_item`` (which deduplicates by slug and would otherwise
+    overwrite — leaving index saying 5 but vault only having 3).
     """
     out_dir = os.path.join(vault_root, "Daily", date_str)
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "_index.md")
+
+    # Plan 9: collapse any same-URL items before counting + listing.
+    # We normalise the URL the same way filter_processed does so a
+    # utm/fragment variant doesn't sneak in twice. First-occurrence wins.
+    from pipeline.lib.processed_store import normalize_url
+    seen_urls: set = set()
+    unique_items: list = []
+    for it in items:
+        norm = normalize_url((it.get("url") or "").strip())
+        key = norm or f"__no_url__{id(it)}"
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        unique_items.append(it)
+    items = unique_items
 
     by_source = {}
     for it in items:

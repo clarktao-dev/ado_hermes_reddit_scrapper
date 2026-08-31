@@ -155,6 +155,17 @@ def filter_processed(
     # with existing callers; it is no longer used internally.
     _ = days_threshold  # intentionally unused
 
+    # Plan 9 (2026-08-31): same-batch URL dedup. Some RSS feeds (notably
+    # Zeit Wirtschaft) occasionally return multiple <item> entries for the
+    # same article in a single fetch — same URL, slightly different
+    # metadata (timestamps, summary variants). Without this gate, each
+    # copy survives to translate → rank → vault, where they all write the
+    # same filename (overwriting each other) while each gets its own slot
+    # in _index.md, producing the "index lists 5, vault has 3" mismatch
+    # observed on 2026-08-31. Cross-run ledger dedup below cannot catch
+    # this because these are NEW articles — never seen by the ledger.
+    seen_urls_in_batch: set = set()
+
     for item in items:
         url = (item.get("url") or "").strip()
         if not url:
@@ -164,6 +175,18 @@ def filter_processed(
 
         normalized = normalize_url(url)
         item["url_normalized"] = normalized
+
+        # Plan 9: drop intra-batch duplicates first (cheaper than the
+        # ledger lookup, and avoids spending a Firestore roundtrip on
+        # entries we'd reject anyway). First occurrence wins, matching
+        # RSS feed ordering.
+        if normalized in seen_urls_in_batch:
+            logger.info(
+                "[skip same-batch-dup] %s | %s",
+                normalized, item.get("title", "")[:60],
+            )
+            continue
+        seen_urls_in_batch.add(normalized)
 
         # Exact-match dedup via Airtable ledger.
         if store.is_processed("news", normalized):
@@ -177,7 +200,8 @@ def filter_processed(
         kept.append(item)
 
     logger.info(
-        "filter_processed: %d kept, %d skipped(exact), %d skipped(no-url)",
+        "filter_processed: %d kept, %d skipped(exact), %d skipped(no-url) "
+        "[Plan 9: same-batch URL dedup also enforced]",
         len(kept), skipped_exact, skipped_no_url,
     )
     return kept
