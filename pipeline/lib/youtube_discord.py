@@ -75,10 +75,29 @@ def _send(channel: str, content: str, as_embed: bool = True, title: str = "",
     return []
 
 
+def _format_published(epoch) -> str:
+    """Format a publish timestamp (epoch seconds) as YYYY-MM-DD UTC.
+
+    Returns ``"——"`` for missing/invalid values so the line stays consistent
+    across all digests in a run.
+    """
+    from datetime import datetime, timezone
+    if not epoch:
+        return "——"
+    try:
+        return datetime.fromtimestamp(int(epoch), timezone.utc).strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OSError):
+        return "——"
+
+
 def _build_embed_body(d) -> str:
     """Build the body of one embed from one digest. No truncation."""
+    pub = _format_published(getattr(d, "published_epoch", None))
+    title = getattr(d, "title", None) or "（無標題）"
     parts = [
         f"**頻道**：{d.channel_name}",
+        f"**標題**：{title}",
+        f"**發布日期**：{pub}",
         f"**影片時長**：{d.duration_sec // 60} 分 {d.duration_sec % 60} 秒",
         f"**連結**：{d.url}",
         "",
