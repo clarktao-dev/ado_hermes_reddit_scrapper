@@ -300,7 +300,7 @@ class TestSideEffects:
 
 class TestAuthAndRetry:
     def test_missing_credentials_raises_auth_error(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         for key in (
             "FIRESTORE_PROJECT_ID",
@@ -308,6 +308,18 @@ class TestAuthAndRetry:
             "FIRESTORE_CREDENTIALS_JSON",
         ):
             monkeypatch.delenv(key, raising=False)
+        # Block host-side auto-discovery so this test exercises the
+        # "no credentials anywhere" failure mode even when the host
+        # has a service-account key on disk. Also clear the client
+        # cache so a previously-cached (successful) client from another
+        # test doesn't leak in.
+        from pipeline.lib import firestore_client as _fc
+        _fc.clear_client_cache()
+        monkeypatch.setattr(
+            "pipeline.lib.firestore_client._discover_sa_path",
+            lambda: None,
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
         s = ProcessedStore("appX")
         with pytest.raises(ProcessedStoreAuthError):
             s.is_processed("youtube", "x")

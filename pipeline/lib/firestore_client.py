@@ -3,7 +3,13 @@
 Authentication (first match wins):
   1. ``GOOGLE_APPLICATION_CREDENTIALS`` — path to a service-account JSON key.
   2. ``FIRESTORE_CREDENTIALS_JSON`` — inline JSON string (useful in CI).
-  3. Application Default Credentials (``gcloud auth application-default login``).
+  3. **Auto-discovered service-account JSON** at one of the well-known host
+     paths (covers cron jobs whose prompt forgot to ``source .env``).
+  4. Application Default Credentials (``gcloud auth application-default login``).
+
+Auto-discovered paths (checked in order, first hit wins):
+  - ``$HOME/.hermes/firestore-sa.json``
+  - ``$HOME/.config/gcloud/application_default_credentials.json``
 
 Environment:
   - ``FIRESTORE_PROJECT_ID`` — GCP project id (required unless embedded in creds).
@@ -61,10 +67,23 @@ def get_project_id() -> str:
         except (OSError, json.JSONDecodeError):
             pass
 
+    # Last resort for project_id inference: auto-discovered SA on host.
+    discovered = _discover_sa_path()
+    if discovered:
+        try:
+            with open(discovered, encoding="utf-8") as fh:
+                data = json.load(fh)
+            project = data.get("project_id", "")
+            if project:
+                return project
+        except (OSError, json.JSONDecodeError):
+            pass
+
     raise FirestoreConfigError(
         "FIRESTORE_PROJECT_ID not set and could not infer project_id from "
         "credentials. Set FIRESTORE_PROJECT_ID or provide a service-account "
-        "JSON via GOOGLE_APPLICATION_CREDENTIALS / FIRESTORE_CREDENTIALS_JSON."
+        "JSON via GOOGLE_APPLICATION_CREDENTIALS / FIRESTORE_CREDENTIALS_JSON, "
+        "or place a service-account JSON at $HOME/.hermes/firestore-sa.json."
     )
 
 
@@ -86,6 +105,28 @@ def collection_name_for_table(table_name: str) -> str:
         ),
     }
     return mapping.get(table_name, table_name)
+
+
+def _candidate_sa_paths() -> list[str]:
+    """Return well-known host paths where a Firestore SA key may live.
+
+    Order matters — first hit wins. Kept conservative: only the hermes
+    host config and the standard gcloud ADC location.
+    """
+    paths: list[str] = []
+    home = os.path.expanduser("~")
+    if home and home != "~":
+        paths.append(os.path.join(home, ".hermes", "firestore-sa.json"))
+        paths.append(os.path.join(home, ".config", "gcloud", "application_default_credentials.json"))
+    return paths
+
+
+def _discover_sa_path() -> Optional[str]:
+    """First existing path from :func:`_candidate_sa_paths`, or ``None``."""
+    for p in _candidate_sa_paths():
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 @lru_cache(maxsize=1)
@@ -119,10 +160,29 @@ def get_firestore_client() -> Any:
         )
         return client
 
-    # GOOGLE_APPLICATION_CREDENTIALS or ADC.
+    # 1) Explicit GOOGLE_APPLICATION_CREDENTIALS
+    # 2) Auto-discovered SA on host (covers cron jobs that forgot to source .env)
+    gac_explicit = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    sa_path = gac_explicit if gac_explicit else _discover_sa_path()
+    if sa_path:
+        credentials = service_account.Credentials.from_service_account_file(sa_path)
+        client = firestore.Client(
+            project=project_id,
+            credentials=credentials,
+            database=database_id,
+        )
+        _log().info(
+            "Firestore client ready: project=%s database=%s (sa=%s)",
+            project_id,
+            database_id,
+            sa_path,
+        )
+        return client
+
+    # Last resort: rely on ambient ADC (gcloud auth application-default login).
     client = firestore.Client(project=project_id, database=database_id)
     _log().info(
-        "Firestore client ready: project=%s database=%s",
+        "Firestore client ready: project=%s database=%s (ambient ADC)",
         project_id,
         database_id,
     )
