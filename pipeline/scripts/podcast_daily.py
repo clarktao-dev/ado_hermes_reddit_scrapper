@@ -21,7 +21,10 @@ from pathlib import Path
 from typing import Optional
 
 # Make pipeline package importable when run from cron (cwd may differ).
-PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+# __file__ = pipeline/scripts/podcast_daily.py → parents[0] = scripts/,
+# parents[1] = pipeline/, parents[2] = repo root. We need the repo root
+# on sys.path so ``import pipeline.lib.config_loader`` resolves.
+PIPELINE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PIPELINE_ROOT))
 
 from pipeline.lib.config_loader import load_config  # noqa: E402

@@ -133,3 +133,31 @@ class TestPickChannelsWithMixedChannels:
             picked = pick_channels(channels, n=2)
         # 8/31 doy=243, 243 % 3 = 0 → start at yt1
         assert [c["id"] for c in picked] == ["yt1", "limmo"]
+
+
+class TestScriptSysPathBootstrap:
+    """Regression for 2026-09-03 (incident after Cursor PR #8 merge).
+
+    ``podcast_daily.py`` lives at ``pipeline/scripts/podcast_daily.py`` so
+    ``__file__.resolve().parents[2]`` is the repo root. If someone regresses
+    to ``parents[1]``, ``import pipeline.lib.config_loader`` fails with
+    ``ModuleNotFoundError`` when the script is invoked from cron (cwd is
+    not necessarily the repo root).
+
+    Verify the bootstrap path actually contains the ``pipeline`` package.
+    """
+
+    def test_module_is_importable(self) -> None:
+        # If the bootstrap path is wrong, this import fails with
+        # ModuleNotFoundError before any test body runs.
+        import pipeline.scripts.podcast_daily  # noqa: F401
+
+    def test_bootstrap_path_contains_pipeline_package(self) -> None:
+        # Walk from the script file and confirm the pipeline/ package is
+        # reachable via the configured sys.path entry.
+        from pipeline.scripts.podcast_daily import PIPELINE_ROOT  # type: ignore[attr-defined]
+        assert (Path(PIPELINE_ROOT) / "pipeline" / "__init__.py").is_file(), (
+            f"PIPELINE_ROOT ({PIPELINE_ROOT}) does not contain the pipeline "
+            f"package — likely a Path(__file__).resolve().parents[N] off-by-one "
+            f"regression. Expect parents[2] for scripts/."
+        )
