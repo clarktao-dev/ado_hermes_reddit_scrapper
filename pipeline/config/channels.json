@@ -1,5 +1,5 @@
 {
-  "_comment": "YouTube channels for daily podcast analysis. category used for round-robin scheduling; daily pick rotates across categories.",
+  "_comment": "Channels for daily podcast analysis (YouTube + RSS). Round-robin by category/doy. Channels with source_type='podcast' are non-YouTube feeds (e.g. Podigee RSS) — youtube_daily dispatches them via podcast_fetch, never yt-dlp.",
   "channels": [
     {
       "id": "finanztip",

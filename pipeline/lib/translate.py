@@ -10,6 +10,7 @@ default (already wired in reddit_safe).
 import json
 import sys
 import time
+from pathlib import Path
 
 # --------------------------------------------------------------------------- #
 # Global LLM call cooldown
@@ -53,9 +54,15 @@ class _Cooldown:
         return False
 
 # Make reddit-safe importable without installing the package.
-_REDDIT_SAFE_SRC = "/root/reddit-safe/src"
-if _REDDIT_SAFE_SRC not in sys.path:
-    sys.path.insert(0, _REDDIT_SAFE_SRC)
+# Prefer the production checkout; fall back to the pipeline test stub
+# (Cloud Agent / CI sandboxes without /root/reddit-safe).
+_REDDIT_SAFE_CANDIDATES = (
+    "/root/reddit-safe/src",
+    str(Path(__file__).resolve().parents[2] / "pipeline" / "tests" / "stubs"),
+)
+for _src in _REDDIT_SAFE_CANDIDATES:
+    if Path(_src).is_dir() and _src not in sys.path:
+        sys.path.append(_src)  # append — never shadow an already-installed pkg
 
 from reddit_safe.pipeline.llm_client import call_json, LLMError  # noqa: E402
 

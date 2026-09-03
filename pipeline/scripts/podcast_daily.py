@@ -1,36 +1,14 @@
 #!/usr/bin/env python3
-"""Daily podcast-only pipeline (Plan 10, 2026-08-31).
+"""Podcast daily pipeline — Phase 2 shim (2026-09-03).
 
-Run by cron (currently the youtube_daily cron; you can split into its own
-cron if the cadence diverges). This script:
+Plan 10 introduced a standalone RSS ingest script. Phase 2 folds podcast
+channels into ``youtube_daily`` so they share LLM digest + Discord + vault
+writes. This file remains as the cron entrypoint for job ``b4af9754c582``
+and forwards to ``youtube_daily.main`` with podcast-only channel selection.
 
-  1. Loads ``config/channels.json`` — same config as YouTube.
-  2. Filters for ``source_type == "podcast"`` channels (currently l'Immo).
-  3. Round-robin picks N channels per day (doy % len(channels)) — same
-     selection logic as :func:`youtube_daily.pick_channels`, so a YouTube
-     cron run and a podcast cron run land on the same channel on the same
-     UTC date. Mixing the two source types in one ``pick_channels`` call
-     would have created cross-source scheduling dependencies this script
-     sidesteps.
-  4. For each picked channel: fetch RSS → dedup against ProcessedStore
-     → fetch transcripts (Podigee JSON > VTT > RSS description) →
-     write vault ``immobilien-kb/vault/YouTube/<channel>/_transcripts/
-     <episode_guid>.md`` (same layout as YouTube transcripts so the
-     cleanup cron and Obsidian reader work unchanged).
-  5. Marks each new episode in ProcessedStore (source_type="podcast")
-     so we don't re-fetch on the next run.
-
-No LLM calls here. Transcript ingestion + vault persistence only.
-Translation + digest live in youtube_daily.
-
-Why a separate script (instead of extending youtube_daily)
-----------------------------------------------------------
-youtube_daily.py is 1006 lines with deep YouTube-specific call chains
-(Invidious → kome.ai → Google Translate → Map-Reduce digest). Bolting
-on a podcast fetcher at line 459 would force every call site to handle
-two source types. Cleaner to keep youtube_daily pure-YouTube and let
-this script own the podcast half. They share config, dedup store, and
-cron, but their fetch/translate stages are independent.
+Helpers below (``_load_podcast_channels``, ``_episode_id_for_dedup``, …)
+are kept for unit-test compatibility and for any one-off scripts that
+still import them; the live cron path goes through :func:`main`.
 """
 from __future__ import annotations
 
@@ -58,6 +36,7 @@ from pipeline.lib.processed_store import (  # noqa: E402
     make_hash,
 )
 from pipeline.lib.transcript_cache import write_transcript  # noqa: E402
+from pipeline.youtube_daily import main as youtube_daily_main  # noqa: E402
 from pipeline.youtube_daily import pick_channels  # noqa: E402
 
 logger = logging.getLogger("podcast_daily")
@@ -87,9 +66,9 @@ def _load_podcast_channels() -> list:
 def _episode_id_for_dedup(channel_id: str, episode: PodcastEpisode) -> str:
     """Stable, collision-resistant key per (channel, episode).
 
-    The RSS <guid> is a Podigee hex hash — already unique — but we salt
-    it with the channel id so two podcast feeds can never collide on the
-    same hash row.
+    Kept for Plan 10 test/compat. Phase 2 ``youtube_daily`` uses the
+    sanitised episode guid directly as ``source_id`` with
+    ``source_type='podcast'``.
     """
     return make_hash("podcast", f"{channel_id}|{episode.id}")
 
@@ -101,13 +80,8 @@ def step_fetch_unprocessed_episodes(
 ) -> list[PodcastEpisode]:
     """List recent episodes and filter out anything already in the ledger.
 
-    Returns newest-first list of unprocessed candidates. Empty list means
-    there's nothing new today for this channel — caller should treat as
-    a no-op.
-
-    With ``store=None`` (e.g. ``--skip-store`` mode), skip the dedup
-    check entirely and return every episode. The caller is responsible
-    for not marking anything in the ledger in that mode.
+    Legacy Plan 10 helper — retained for tests. Production path is the
+    youtube_daily shim in :func:`main`.
     """
     episodes = list_podcast_episodes(channel, limit=look_back)
     if store is None:
@@ -129,10 +103,7 @@ def step_persist_episode(
     run_id: str,
     dry_run: bool = False,
 ) -> dict:
-    """Fetch transcript, write vault, mark in ledger.
-
-    Returns a summary dict so the caller can aggregate a run report.
-    """
+    """Fetch transcript, write vault, mark in ledger (Plan 10 legacy helper)."""
     text, source = fetch_transcript(episode)
     vault_channel_name = _vault_channel_name(channel)
     summary = {
@@ -147,9 +118,6 @@ def step_persist_episode(
         "skipped_reason": None,
     }
 
-    # Empty description floor — no transcript AND no description means
-    # the episode is unusable for any downstream stage. Skip it but log
-    # so the user can decide whether to backfill manually.
     if source == "rss-description" and not episode.description:
         summary["skipped_reason"] = "no transcript and no description"
         logger.warning("skip unusable episode: %s | %s",
@@ -193,34 +161,30 @@ def step_persist_episode(
 
 
 def _vault_channel_name(channel: dict) -> str:
-    """Channel folder name in ``immobilien-kb/vault/YouTube/<name>/``.
-
-    Podcast channels need a vault folder; we use a sanitised version of
-    the channel id. Keeps the existing cleanup cron / Obsidian readers
-    happy — they iterate channel folders regardless of source type.
-    """
+    """Channel folder name in ``immobilien-kb/vault/YouTube/<name>/``."""
     import re
     safe = re.sub(r"[^A-Za-z0-9_\-]", "_", channel["id"])
     return safe
 
 
 def _vault_episode_id(episode: PodcastEpisode) -> str:
-    """Filename-safe episode id for the transcript cache.
-
-    RSS <guid> is usually a Podigee hex hash (already safe) but some
-    podcasts use full URLs. Strip non-alphanumerics to stay compatible
-    with the YouTube-side ``_transcripts/<video_id>.md`` layout.
-    """
+    """Filename-safe episode id for the transcript cache."""
     import re
     safe = re.sub(r"[^A-Za-z0-9_\-]", "_", episode.id)
     return safe[:80] or "unknown_episode"
 
 
 def main() -> int:
+    """Shim: forward podcast channels into ``youtube_daily.main``.
+
+    Cron ``b4af9754c582`` still invokes this script. We resolve the
+    podcast-only channel set, then rewrite ``sys.argv`` so youtube_daily
+    runs the shared digest + Discord path.
+    """
     ap = argparse.ArgumentParser(
-        description="Daily podcast pipeline. Filters config/channels.json "
-                    "for source_type='podcast' channels, picks via round-"
-                    "robin, persists transcripts to vault.",
+        description="Phase 2 shim — podcast channels via youtube_daily "
+                    "(LLM digest + Discord). Filters config/channels.json "
+                    "for source_type='podcast'.",
     )
     ap.add_argument("--dry-run", action="store_true",
                     help="Skip vault writes and ledger marks (report only).")
@@ -233,11 +197,9 @@ def main() -> int:
                     help="Pipeline run id (default: auto-generated).")
     ap.add_argument("--skip-store", action="store_true",
                     help="Bypass ProcessedStore (for local debugging).")
+    ap.add_argument("--mode", choices=("short", "long"), default="short",
+                    help="Forwarded to youtube_daily (default short).")
     args = ap.parse_args()
-
-    run_id = args.pipeline_run_id or datetime.now(timezone.utc).strftime(
-        "pod-%Y%m%d-%H%M%S"
-    )
 
     channels = _load_podcast_channels()
     if not channels:
@@ -250,67 +212,36 @@ def main() -> int:
         channels = [c for c in channels if c["id"] in wanted]
     else:
         channels = pick_channels(channels, n=min(args.n_channels, len(channels)))
-    print(f"[podcast_daily] picked {len(channels)}: {[c['id'] for c in channels]}")
 
-    store = None
-    if not args.skip_store:
-        store = ProcessedStore(PROCESSED_BASE_ID, table_name=PROCESSED_TABLE)
-        logger.info("ProcessedStore ready: base=%s table=%s",
-                    PROCESSED_BASE_ID, PROCESSED_TABLE)
+    if not channels:
+        print("[podcast_daily] no channels matched — exit 0")
+        return 0
 
-    run_start = datetime.now(timezone.utc)
-    summaries = []
-    for ch in channels:
-        # In --skip-store mode we still want to see what would happen,
-        # so fetch episodes and report — no ledger dedup, no vault write.
-        if args.skip_store:
-            eps = list_podcast_episodes(ch, limit=3)
-            for ep in eps:
-                summaries.append({
-                    "channel_id": ch["id"],
-                    "episode_id": ep.id,
-                    "title": ep.title,
-                    "duration": ep.duration,
-                    "transcript_source": ep.transcript_type or "rss-description",
-                    "transcript_chars": len(ep.description),
-                    "wrote_vault": False,
-                    "marked_processed": False,
-                    "skipped_reason": "skip-store mode",
-                })
-            continue
+    ids = ",".join(c["id"] for c in channels)
+    run_id = args.pipeline_run_id or datetime.now(timezone.utc).strftime(
+        "pod-%Y%m%d-%H%M%S"
+    )
+    print(f"[podcast_daily] shim → youtube_daily channels={ids} "
+          f"mode={args.mode} run_id={run_id}")
 
-        candidates = step_fetch_unprocessed_episodes(ch, store, look_back=5)
-        if not candidates:
-            print(f"[{ch['id']}] no new episodes (ledger clean)")
-            continue
-        # Only ingest the newest unprocessed episode to keep run bounded
-        # and avoid hammering Podigee when there's a multi-episode backlog.
-        # Cleanup cron will eventually drain the rest as old transcripts
-        # expire from the 30-day cache.
-        ep = candidates[0]
-        summary = step_persist_episode(
-            ch, ep, store, run_id=run_id, dry_run=args.dry_run,
-        )
-        summaries.append(summary)
+    yt_argv = [
+        "youtube_daily.py",
+        "--channels", ids,
+        "--mode", args.mode,
+        "--pipeline-run-id", run_id,
+        "--n-channels", str(max(len(channels), 1)),
+    ]
+    if args.dry_run:
+        yt_argv.append("--dry-run")
+    if args.skip_store:
+        yt_argv.append("--skip-store")
 
-    # Print run report so cron output is greppable.
-    print("\n=== podcast_daily run report ===")
-    print(f"run_id: {run_id}")
-    print(f"channels: {[c['id'] for c in channels]}")
-    for s in summaries:
-        line = (
-            f"  • [{s.get('channel_id','?')}] {s.get('title','?')[:60]}"
-            f"  src={s.get('transcript_source','?')}"
-            f"  chars={s.get('transcript_chars','?')}"
-        )
-        if s.get("skipped_reason"):
-            line += f"  SKIP={s['skipped_reason']}"
-        else:
-            line += f"  wrote={s.get('wrote_vault')} marked={s.get('marked_processed')}"
-        print(line)
-    elapsed = (datetime.now(timezone.utc) - run_start).total_seconds()
-    print(f"elapsed: {elapsed:.2f}s")
-    return 0
+    old_argv = sys.argv
+    try:
+        sys.argv = yt_argv
+        return int(youtube_daily_main() or 0)
+    finally:
+        sys.argv = old_argv
 
 
 if __name__ == "__main__":
