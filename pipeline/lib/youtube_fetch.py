@@ -66,8 +66,44 @@ class TranscriptResult:
     is_premium: bool  # kome.ai premium flag; if True, content may be truncated
 
 
+def _is_youtube_channel_url(url: str) -> bool:
+    """Return True iff ``url`` looks like a YouTube channel/video URL.
+
+    L3 guard (2026-09-03): podcast RSS hosts (Podigee / Anchor / Libsyn / …)
+    must never reach yt-dlp — appending ``/videos`` to a Podigee feed URL
+    raises ``Unsupported URL`` and used to abort the whole daily run.
+    """
+    if not url or not isinstance(url, str):
+        return False
+    raw = url.strip()
+    if not raw:
+        return False
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    except Exception:  # noqa: BLE001
+        return False
+    host = (parsed.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return False
+    if host in ("youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"):
+        return True
+    return host.endswith(".youtube.com")
+
+
 def _run_yt_dlp(channel_url: str, limit: int = 10) -> List[dict]:
-    """List latest videos on a YouTube channel via yt-dlp flat-playlist."""
+    """List latest videos on a YouTube channel via yt-dlp flat-playlist.
+
+    Non-YouTube URLs return ``[]`` (INFO log) instead of raising RuntimeError —
+    see :func:`_is_youtube_channel_url`.
+    """
+    if not _is_youtube_channel_url(channel_url):
+        logger.info(
+            "yt-dlp URL guard: skipping non-YouTube URL: %s", channel_url,
+        )
+        return []
     if not channel_url.rstrip("/").endswith("/videos"):
         url = channel_url.rstrip("/") + "/videos"
     else:
@@ -319,7 +355,16 @@ def list_channel_videos(channel_id: str, channel_name: str, channel_url: str,
         limit: max videos to return.
         youtube_channel_id: YouTube's UC... channel id (from channels.json).
             Passed through to the Invidious URL and to the yt-dlp RSS layer.
+
+    Non-YouTube URLs (podcast RSS hosts) return ``[]`` immediately — callers
+    with ``source_type='podcast'`` should use ``podcast_fetch`` instead.
     """
+    if not _is_youtube_channel_url(channel_url):
+        logger.info(
+            "list_channel_videos: skipping non-YouTube URL for %s: %s",
+            channel_id, channel_url,
+        )
+        return []
     channel = {
         "id": channel_id,
         "name": channel_name,

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""YouTube Podcast daily pipeline (kome.ai → Map-Reduce → Obsidian + Discord).
+"""YouTube + Podcast daily pipeline (fetch → Map-Reduce → Obsidian + Discord).
 
-Steps (Task 7 short-first default, 2026-08-09):
-  1. load_config (channels.json)
-  2. youtube_fetch   — pick N channels (round-robin by day-of-year) → newest video each
+Steps (Task 7 short-first default, 2026-08-09; Phase 2 podcast unify 2026-09-03):
+  1. load_config (channels.json) — YouTube *and* ``source_type=podcast`` feeds
+  2. fetch — YouTube via Invidious/yt-dlp/kome.ai; podcast via RSS/Podigee
   3. ProcessedStore  — Firestore ledger is the single source of truth for dedup.
 state.json is **deprecated** but still read for backward-compat (so existing
 processed_ids aren't re-processed). New marks go to the ledger, not state.json.
@@ -21,13 +21,16 @@ processed_ids aren't re-processed). New marks go to the ledger, not state.json.
      the ProcessedContent ledger (best-effort; failure doesn't lose the mark).
      Skipped under ``--dry-run``.
 
+L2 (2026-09-03): per-channel try/except so one channel crash cannot abort
+sibling digests. L3: yt-dlp URL guard rejects non-YouTube hosts.
+
 Long-form is on-demand via ``pipeline/scripts/recommend_long_form.py confirm``.
 
 Run:
   python3 youtube_daily.py                # default short mode
   python3 youtube_daily.py --mode long    # full long-form Map-Reduce
   python3 youtube_daily.py --dry-run      # fetch + translate only; no vault / Discord / GitHub / ledger
-  python3 youtube_daily.py --channels '1alage,marktcheck'
+  python3 youtube_daily.py --channels '1alage,limmo'
 """
 from __future__ import annotations
 import argparse
@@ -51,6 +54,7 @@ from pipeline.lib import (  # noqa: E402
     youtube_obsidian,
     youtube_discord,
 )
+from pipeline.lib import podcast_fetch  # noqa: E402
 from pipeline.lib.processed_store import (  # noqa: E402
     ProcessedStore,
     make_hash,
@@ -81,8 +85,96 @@ if not logger.handlers:
 
 
 def load_channels() -> list:
+    """Return all enabled channels (YouTube + podcast).
+
+    ``source_type='podcast'`` channels stay in the pool so round-robin can
+    pick them; :func:`_process_one_channel` dispatches fetch by source type.
+    Filtering them out here would strand limmo-style feeds forever.
+    """
     data = json.loads(Path(CHANNELS_CONFIG).read_text(encoding="utf-8"))
     return [c for c in data.get("channels", []) if c.get("enabled", True)]
+
+
+def _is_podcast_channel(channel: dict) -> bool:
+    return (channel.get("source_type") or "").strip().lower() == "podcast"
+
+
+def _ledger_source_type(channel: dict) -> str:
+    return "podcast" if _is_podcast_channel(channel) else "youtube"
+
+
+def _podcast_episode_id(episode: podcast_fetch.PodcastEpisode) -> str:
+    """Filename-/ledger-safe id derived from the RSS guid."""
+    safe = re.sub(r"[^A-Za-z0-9_\-]", "_", episode.id)
+    return safe[:80] or "unknown_episode"
+
+
+def _podcast_to_video_meta(
+    episode: podcast_fetch.PodcastEpisode, channel: dict,
+) -> youtube_fetch.VideoMeta:
+    """Adapt a PodcastEpisode to VideoMeta so digest/Discord/vault stay shared."""
+    meta = youtube_fetch.VideoMeta(
+        id=_podcast_episode_id(episode),
+        title=episode.title,
+        duration_sec=int(episode.duration or 0),
+        epoch=int(episode.published.timestamp()) if episode.published else None,
+        url=episode.audio_url or episode.rss_url or channel.get("url", ""),
+        channel_id=channel.get("id", ""),
+        channel_name=channel.get("name") or episode.channel,
+    )
+    # Stash the original episode for transcript fetch (non-frozen dataclass).
+    meta._podcast_episode = episode  # type: ignore[attr-defined]
+    return meta
+
+
+def _fetch_transcript_for_channel(
+    channel: dict,
+    video: youtube_fetch.VideoMeta,
+    *,
+    write_cache: bool = True,
+) -> youtube_fetch.TranscriptResult:
+    """Dispatch transcript fetch by channel source_type."""
+    if _is_podcast_channel(channel):
+        ep = getattr(video, "_podcast_episode", None)
+        if ep is None:
+            # Reconstruct a minimal episode so we can still hit the description
+            # floor if the listing→fetch handoff lost the object.
+            ep = podcast_fetch.PodcastEpisode(
+                id=video.id,
+                title=video.title,
+                channel=video.channel_name,
+                published=datetime.fromtimestamp(
+                    video.epoch or 0, tz=timezone.utc,
+                ),
+                duration=video.duration_sec,
+                audio_url=video.url,
+                description="",
+                rss_url=channel.get("url", ""),
+            )
+        text, source = podcast_fetch.fetch_transcript(ep)
+        if write_cache and text and source != "rss-description":
+            try:
+                from pipeline.lib import transcript_cache
+                transcript_cache.write_transcript(
+                    channel=channel.get("id") or video.channel_name,
+                    video_id=video.id,
+                    text=text,
+                    language="de",
+                    source=source,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "podcast transcript cache write failed for %s: %s",
+                    video.id, e,
+                )
+        return youtube_fetch.TranscriptResult(
+            video=video,
+            language="de",
+            text=text or "",
+            n_chars=len(text or ""),
+            is_premium=False,
+        )
+    return youtube_fetch.fetch_transcript(video, write_cache=write_cache)
 
 
 # LLM sampling for short-mode structuring. Lower temperature reduces
@@ -443,11 +535,11 @@ def pick_video_for_channel(
     state: youtube_state.StateStore | None = None,
     look_back: int = 10,
 ) -> list[youtube_fetch.VideoMeta]:
-    """List videos and return ALL unprocessed candidates (newest first).
+    """List videos/episodes and return ALL unprocessed candidates (newest first).
 
-    Dedup is checked against the ProcessedStore (Airtable). When state.json
-    still has records not yet migrated to Airtable, those are also respected
-    (backward compat).
+    Dedup is checked against the ProcessedStore (Airtable/Firestore). When
+    state.json still has records not yet migrated, those are also respected
+    for YouTube channels (backward compat). Podcast channels skip state.json.
 
     Returns a LIST (not a single VideoMeta) so the caller can retry with the
     next candidate if the current one fails (e.g. empty transcript from a
@@ -456,25 +548,33 @@ def pick_video_for_channel(
 
     The returned list is capped at ``look_back`` items.
     """
-    metas = youtube_fetch.list_channel_videos(
-        channel_id=channel["id"],
-        channel_name=channel["name"],
-        channel_url=channel["url"],
-        youtube_channel_id=channel.get("channel_id"),
-        limit=look_back,
-    )
+    source_type = _ledger_source_type(channel)
+    if _is_podcast_channel(channel):
+        episodes = podcast_fetch.list_podcast_episodes(channel, limit=look_back)
+        metas = [_podcast_to_video_meta(ep, channel) for ep in episodes]
+    else:
+        metas = youtube_fetch.list_channel_videos(
+            channel_id=channel["id"],
+            channel_name=channel["name"],
+            channel_url=channel["url"],
+            youtube_channel_id=channel.get("channel_id"),
+            limit=look_back,
+        )
     candidates: list[youtube_fetch.VideoMeta] = []
     for m in metas:
-        # Primary check: Airtable ledger.
-        if store.is_processed("youtube", m.id):
+        # Primary check: ledger.
+        if store.is_processed(source_type, m.id):
             logger.info(
                 "skip already-processed (ledger): %s | %s",
                 channel["id"], m.id,
             )
             continue
-        # Backward-compat: legacy state.json. Remove once state.json is
-        # fully migrated (see integration task notes).
-        if state is not None and _state_json_has(state, channel["id"], m.id):
+        # Backward-compat: legacy state.json (YouTube only).
+        if (
+            not _is_podcast_channel(channel)
+            and state is not None
+            and _state_json_has(state, channel["id"], m.id)
+        ):
             logger.info(
                 "skip already-processed (legacy state.json): %s | %s",
                 channel["id"], m.id,
@@ -573,7 +673,14 @@ def _build_metadata(digest, video: youtube_fetch.VideoMeta,
         "map_calls": int(digest.map_calls),
         "reduce_calls": int(digest.reduce_calls),
         "elapsed_sec": float(digest.elapsed_sec),
+        "source_type": _ledger_source_type(channel),
     }
+    if _is_podcast_channel(channel):
+        metadata["rss_url"] = channel.get("url", "")
+        ep = getattr(video, "_podcast_episode", None)
+        if ep is not None:
+            metadata["episode_guid"] = ep.id
+            metadata["transcript_type"] = ep.transcript_type
     if digest.summary_zh and "內容待補" in digest.summary_zh:
         metadata["content_quality"] = "degraded"
     return metadata
@@ -633,6 +740,100 @@ def _build_short_digest(video, translated_text: str, t0: float) -> youtube_trans
         reduce_calls=1,
         elapsed_sec=time.time() - t0,
     )
+
+
+def _process_one_channel(
+    ch: dict,
+    *,
+    store: ProcessedStore | None,
+    state: youtube_state.StateStore,
+    args: argparse.Namespace,
+    forced_video: youtube_fetch.VideoMeta | None = None,
+) -> tuple[dict, youtube_fetch.VideoMeta, youtube_translate.VideoDigest] | None:
+    """Fetch + translate + digest one channel. Returns None on skip.
+
+    Raises on unexpected errors so the caller (L2 isolation) can log + continue.
+    ``SystemExit`` / ``KeyboardInterrupt`` are not caught here — they propagate.
+    """
+    print(f"\n=== {ch['name']} ({ch['id']}) "
+          f"[{_ledger_source_type(ch)}] ===")
+    v: youtube_fetch.VideoMeta | None = None
+    candidates: list[youtube_fetch.VideoMeta] = []
+    source_type = _ledger_source_type(ch)
+
+    if forced_video is not None:
+        if store is not None and store.is_processed(source_type, forced_video.id):
+            if args.force:
+                logger.warning(
+                    "FORCE: re-processing already-processed video %s",
+                    forced_video.id,
+                )
+                v = forced_video
+                candidates = [forced_video]
+            else:
+                logger.info("skip already-processed: %s", forced_video.id)
+                print(f"  [skip] already-processed: {forced_video.id}")
+                return None
+        else:
+            v = forced_video
+            candidates = [forced_video]
+            logger.info("using forced video: %s", v.id)
+    elif store is not None:
+        candidates = pick_video_for_channel(
+            ch, store=store, state=state, look_back=30,
+        )
+        if candidates:
+            v = candidates[0]
+    else:
+        legacy_v = _legacy_pick(ch, state)
+        if legacy_v is not None:
+            candidates = [legacy_v]
+            v = legacy_v
+
+    if v is None:
+        print(f"  [skip] no unprocessed video found in latest 30")
+        return None
+
+    idx = 0
+    tr = None
+    while v is not None:
+        print(f"  [fetch] {v.id} | {v.title[:60]} ({v.duration_sec}s)")
+        tr = _fetch_transcript_for_channel(
+            ch, v, write_cache=not args.dry_run,
+        )
+        if tr.text and _is_stub_transcript(tr.text):
+            print(f"  [warn] stub transcript detected (error page HTML); "
+                  f"trying next candidate")
+            tr = youtube_fetch.TranscriptResult(
+                video=v, language="none", text="", n_chars=0,
+                is_premium=tr.is_premium,
+            )
+        if tr.text:
+            break
+        print(f"  [warn] empty transcript (lang={tr.language}); "
+              f"trying next candidate")
+        idx += 1
+        if idx >= len(candidates):
+            print(f"  [skip] exhausted {len(candidates)} candidate(s) "
+                  f"in {ch['id']}; none had transcripts")
+            v = None
+            break
+        v = candidates[idx]
+
+    if v is None or tr is None or not tr.text:
+        return None
+
+    print(f"  [transcript] {tr.n_chars} chars (premium={tr.is_premium})")
+    if args.mode == "short":
+        print(f"  [translate+short] Google → ONE lightweight LLM call")
+        t0 = time.time()
+        translated = _translate_only(tr.text)
+        digest = _build_short_digest(v, translated, t0=t0)
+        digest.n_chars = tr.n_chars
+    else:
+        print(f"  [translate] starting Map-Reduce...")
+        digest = youtube_translate.digest_video(v, tr.text)
+    return (ch, v, digest)
 
 
 def main() -> int:
@@ -725,95 +926,46 @@ def main() -> int:
 
     digests = []
     selected: list[tuple[dict, youtube_fetch.VideoMeta, youtube_translate.VideoDigest]] = []
+    n_channels_attempted = 0
+    n_channels_failed: list[tuple[str, str, str]] = []
+
     for i, ch in enumerate(channels):
-        # Cooldown between channels so kome.ai (third-party transcript API) doesn't
-        # throttle us. Per user 2026-08-09: enforce ≥45s between two videos.
-        if i > 0:
+        n_channels_attempted += 1
+        # Cooldown between YouTube channels so kome.ai doesn't throttle us.
+        # Podcast RSS fetches skip the sleep (no third-party transcript API).
+        if i > 0 and not _is_podcast_channel(ch):
             cooldown = 45
             print(f"\n  [cooldown] sleeping {cooldown}s before next channel...")
             time.sleep(cooldown)
-        print(f"\n=== {ch['name']} ({ch['id']}) ===")
-        # Walk through unprocessed candidates until one yields a usable
-        # transcript (Task 9). Previously a single empty-transcript video
-        # (e.g. paywalled member content) would abort the channel; now we
-        # try the next candidate.
-        v: youtube_fetch.VideoMeta | None = None
-        candidates: list[youtube_fetch.VideoMeta] = []
-        if forced_video is not None and i == 0:
-            # --video-id still respects the ledger unless --force is given.
-            if store is not None and store.is_processed("youtube",
-                                                        forced_video.id):
-                if args.force:
-                    logger.warning(
-                        "FORCE: re-processing already-processed video %s",
-                        forced_video.id,
-                    )
-                    v = forced_video
-                    candidates = [forced_video]
-                else:
-                    logger.info(
-                        "skip already-processed: %s", forced_video.id,
-                    )
-                    print(f"  [skip] already-processed: {forced_video.id}")
-                    v = None
-            else:
-                v = forced_video
-                candidates = [forced_video]
-                logger.info("using forced video: %s", v.id)
-        elif store is not None:
-            candidates = pick_video_for_channel(
-                ch, store=store, state=state, look_back=30,
+        try:
+            result = _process_one_channel(
+                ch,
+                store=store,
+                state=state,
+                args=args,
+                forced_video=(forced_video if (forced_video is not None and i == 0) else None),
             )
-            if candidates:
-                v = candidates[0]
-        else:
-            legacy_v = _legacy_pick(ch, state)
-            if legacy_v is not None:
-                candidates = [legacy_v]
-                v = legacy_v
-        if v is None:
-            print(f"  [skip] no unprocessed video found in latest 30")
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except Exception as e:  # noqa: BLE001 — L2 per-channel isolation
+            err_type = type(e).__name__
+            err_msg = str(e)[:300]
+            logger.exception(
+                "channel %s failed (%s): %s — continuing with siblings",
+                ch.get("id"), err_type, err_msg,
+            )
+            print(f"  [error] channel {ch.get('id')} failed: {err_type}: {err_msg}")
+            n_channels_failed.append((ch.get("id", "?"), err_type, err_msg))
             continue
-        # Try the chosen video first; if transcript is empty, walk to next.
-        idx = 0
-        tr = None
-        while v is not None:
-            print(f"  [fetch] {v.id} | {v.title[:60]} ({v.duration_sec}s)")
-            tr = youtube_fetch.fetch_transcript(v, write_cache=not args.dry_run)
-            if tr.text and _is_stub_transcript(tr.text):
-                print(f"  [warn] stub transcript detected (error page HTML); "
-                      f"trying next candidate")
-                tr = youtube_fetch.TranscriptResult(
-                    video=v, language="none", text="", n_chars=0,
-                    is_premium=tr.is_premium,
-                )
-            if tr.text:
-                break  # got a usable transcript
-            print(f"  [warn] empty transcript (lang={tr.language}); "
-                  f"trying next candidate")
-            idx += 1
-            if idx >= len(candidates):
-                print(f"  [skip] exhausted {len(candidates)} candidate(s) "
-                      f"in {ch['id']}; none had transcripts")
-                v = None
-                break
-            v = candidates[idx]
-        if v is None or tr is None or not tr.text:
-            continue
-        print(f"  [transcript] {tr.n_chars} chars (premium={tr.is_premium})")
-        if args.mode == "short":
-            print(f"  [translate+short] Google → ONE lightweight LLM call")
-            t0 = time.time()
-            translated = _translate_only(tr.text)
-            digest = _build_short_digest(v, translated, t0=t0)
-            digest.n_chars = tr.n_chars  # back-fill for vault frontmatter
-        else:
-            print(f"  [translate] starting Map-Reduce...")
-            digest = youtube_translate.digest_video(v, tr.text)
-        digests.append(digest)
-        selected.append((ch, v, digest))
-        # Note: do NOT call state.mark_processed() anymore — state.json is
-        # deprecated. ProcessedStore.mark_processed() (below) is the new home.
+        if result is not None:
+            ch_out, v_out, digest = result
+            digests.append(digest)
+            selected.append((ch_out, v_out, digest))
+
+    if n_channels_failed:
+        print(f"\n[isolation] attempted={n_channels_attempted} "
+              f"failed={len(n_channels_failed)} "
+              f"ids={[f[0] for f in n_channels_failed]}")
 
     if not digests:
         print("\n[nothing to process] no digests produced")
@@ -878,6 +1030,7 @@ def main() -> int:
         commit_sha = push_summary.get("commit_sha")
 
         for ch, video, digest in selected:
+            src_type = _ledger_source_type(ch)
             output_path = _video_output_md_path(
                 vault_root, today_str, digest,
                 content_kind=content_kind,
@@ -885,13 +1038,15 @@ def main() -> int:
             tags = ["long-form"] if args.mode == "long" else ["short"]
             if digest.duration_sec and digest.duration_sec < 60 * 5:
                 tags.append("short")
+            if src_type == "podcast":
+                tags.append("podcast")
             metadata = _build_metadata(digest, video, ch)
             try:
                 record_id = store.mark_processed(
-                    source_type="youtube",
+                    source_type=src_type,
                     source_id=video.id,
                     title=video.title,
-                    channels=[f"youtube.{ch['id']}"],
+                    channels=[f"{src_type}.{ch['id']}"],
                     pipeline_run_id=run_id,
                     output_path=output_path,
                     metadata=metadata,
@@ -899,8 +1054,8 @@ def main() -> int:
                     article_type=content_kind,
                 )
                 logger.info(
-                    "marked processed: %s | %s -> %s (article_type=%s)",
-                    ch["id"], video.id, record_id, content_kind,
+                    "marked processed: %s | %s -> %s (article_type=%s source=%s)",
+                    ch["id"], video.id, record_id, content_kind, src_type,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.error(
@@ -914,7 +1069,7 @@ def main() -> int:
             if msg_ids or commit_sha:
                 try:
                     store.update_side_effects(
-                        source_hash=make_hash("youtube", video.id),
+                        source_hash=make_hash(src_type, video.id),
                         discord_message_id=(",".join(msg_ids) or None),
                         github_commit_sha=commit_sha,
                     )
@@ -926,13 +1081,19 @@ def main() -> int:
     elif args.dry_run:
         print("  [dry-run] skipping mark_processed + update_side_effects")
 
-    print(f"\n[done] total {time.time()-t0:.1f}s, {len(digests)} videos")
+    print(f"\n[done] total {time.time()-t0:.1f}s, {len(digests)} videos "
+          f"(attempted={n_channels_attempted} failed={len(n_channels_failed)})")
     return 0
 
 
 def _legacy_pick(channel: dict, state: youtube_state.StateStore,
                  look_back: int = 10) -> youtube_fetch.VideoMeta | None:
     """Fallback when ProcessedStore is disabled (--skip-store)."""
+    if _is_podcast_channel(channel):
+        episodes = podcast_fetch.list_podcast_episodes(channel, limit=look_back)
+        for ep in episodes:
+            return _podcast_to_video_meta(ep, channel)
+        return None
     metas = youtube_fetch.list_channel_videos(
         channel_id=channel["id"],
         channel_name=channel["name"],

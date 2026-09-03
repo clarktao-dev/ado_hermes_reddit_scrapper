@@ -7,3 +7,4 @@ __pycache__/
 
 # Pipeline runtime state
 pipeline/state/
+.test_stubs/
