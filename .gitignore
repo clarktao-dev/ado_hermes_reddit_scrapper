@@ -8,3 +8,7 @@ __pycache__/
 # Pipeline runtime state
 pipeline/state/
 .test_stubs/
+
+# Plan 11 — short-transcript pending review (local only; never push to vault)
+podcast-kb/vault/_pending_review/
+immobilien-kb/vault/_pending_review/

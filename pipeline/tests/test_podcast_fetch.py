@@ -150,7 +150,8 @@ class TestFetchTranscriptFallback:
 
     def test_falls_back_to_description_when_no_transcript(self) -> None:
         ep = self._make_ep()
-        text, src = podcast_fetch.fetch_transcript(ep)
+        with patch.object(podcast_fetch, "_groq_asr_enabled", return_value=False):
+            text, src = podcast_fetch.fetch_transcript(ep)
         assert src == "rss-description"
         assert "Fallback description" in text
 
@@ -198,3 +199,145 @@ class TestFetchTranscriptFallback:
         assert src == "podcast-transcript-vtt"
         assert "Hi from VTT" in text
         assert "Speaker 0:" not in text
+
+
+class TestGroqWhisperFallback:
+    def _make_ep(self, **overrides) -> podcast_fetch.PodcastEpisode:
+        from datetime import datetime, timezone
+        defaults = dict(
+            id="6b46483eec0c20c1448b0b71daf2a8c7",
+            title="Die Zeiten haben sich geändert",
+            channel="L'Immo",
+            published=datetime.now(timezone.utc),
+            duration=1800,
+            audio_url="https://audio.podigee-cdn.net/ep.mp3",
+            description="x" * 299,
+            transcript_url=None,
+            transcript_type=None,
+            rss_url="https://example.com/feed",
+        )
+        defaults.update(overrides)
+        return podcast_fetch.PodcastEpisode(**defaults)
+
+    def test_no_key_skips_groq(self, monkeypatch) -> None:
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.setenv("PODCAST_GROQ_ASR", "1")
+        with patch.object(podcast_fetch, "_HERMES_ENV_PATH",
+                          Path("/nonexistent/.env")):
+            assert podcast_fetch._groq_asr_enabled() is False
+            text, src = podcast_fetch.fetch_transcript(self._make_ep())
+        assert src == "rss-description"
+        assert len(text) == 299
+
+    def test_key_alone_does_not_enable_asr(self, monkeypatch) -> None:
+        """VPS IP may be Cloudflare-banned — never auto-enable from key alone."""
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+        monkeypatch.delenv("PODCAST_GROQ_ASR", raising=False)
+        with patch.object(podcast_fetch, "_HERMES_ENV_PATH",
+                          Path("/nonexistent/.env")), \
+             patch.object(podcast_fetch, "transcribe_audio_url_via_groq") as groq:
+            assert podcast_fetch._groq_asr_enabled() is False
+            text, src = podcast_fetch.fetch_transcript(self._make_ep())
+        assert src == "rss-description"
+        groq.assert_not_called()
+
+    def test_groq_success_preferred_over_description(self, monkeypatch) -> None:
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+        monkeypatch.setenv("PODCAST_GROQ_ASR", "1")
+        long_text = "Hallo aus Groq. " * 40  # > 500 chars
+        with patch.object(
+            podcast_fetch, "transcribe_audio_url_via_groq",
+            return_value=long_text,
+        ) as groq:
+            text, src = podcast_fetch.fetch_transcript(self._make_ep())
+        assert src == "groq-whisper"
+        assert text == long_text
+        groq.assert_called_once()
+
+    def test_json_still_beats_groq(self, monkeypatch) -> None:
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+        monkeypatch.setenv("PODCAST_GROQ_ASR", "1")
+        ep = self._make_ep(
+            transcript_url="https://example.com/t.json",
+            transcript_type="application/json",
+        )
+        raw = '[{"start":0,"end":1,"text":"Official JSON transcript"}]'
+
+        def fake_urlopen(req, timeout=15):
+            class R:
+                def read(self):
+                    return raw.encode("utf-8")
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    return False
+            return R()
+
+        with patch("urllib.request.urlopen", fake_urlopen), \
+             patch.object(podcast_fetch, "transcribe_audio_url_via_groq") as groq:
+            text, src = podcast_fetch.fetch_transcript(ep)
+        assert src == "podcast-transcript-json"
+        assert "Official JSON" in text
+        groq.assert_not_called()
+
+    def test_groq_short_result_falls_to_description(self, monkeypatch) -> None:
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+        monkeypatch.setenv("PODCAST_GROQ_ASR", "1")
+        with patch.object(
+            podcast_fetch, "transcribe_audio_url_via_groq",
+            return_value="too short",
+        ):
+            text, src = podcast_fetch.fetch_transcript(self._make_ep())
+        assert src == "rss-description"
+        assert len(text) == 299
+
+    def test_groq_opt_out_flag(self, monkeypatch) -> None:
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+        monkeypatch.setenv("PODCAST_GROQ_ASR", "0")
+        with patch.object(podcast_fetch, "transcribe_audio_url_via_groq") as groq:
+            text, src = podcast_fetch.fetch_transcript(self._make_ep())
+        assert src == "rss-description"
+        groq.assert_not_called()
+
+    def test_cloudflare_1010_detected(self) -> None:
+        body = (
+            "<!DOCTYPE html><html><body>error code: 1010</body></html>"
+        )
+        assert podcast_fetch._is_cloudflare_ip_ban(403, body) is True
+        assert podcast_fetch._is_cloudflare_ip_ban(403, "normal api error") is False
+
+    def test_encode_multipart_and_request_shape(self, monkeypatch) -> None:
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test_key")
+        monkeypatch.setenv("PODCAST_GROQ_ASR", "1")
+        monkeypatch.setenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
+        captured = {}
+
+        def fake_urlopen(req, timeout=300):
+            captured["url"] = req.full_url
+            captured["method"] = req.get_method()
+            captured["auth"] = req.headers.get("Authorization")
+            captured["content_type"] = req.headers.get("Content-type") or req.headers.get("Content-Type")
+            captured["body"] = req.data
+            class R:
+                def read(self):
+                    return b"Transcribed German podcast text " * 20
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    return False
+            return R()
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            text = podcast_fetch.transcribe_audio_url_via_groq(
+                "https://audio.podigee-cdn.net/ep.mp3", language="de",
+            )
+        assert text is not None
+        assert len(text) >= 500
+        assert captured["url"] == podcast_fetch._GROQ_TRANSCRIPTIONS_URL
+        assert captured["method"] == "POST"
+        assert captured["auth"] == "Bearer gsk_test_key"
+        assert "multipart/form-data" in captured["content_type"]
+        body = captured["body"].decode("utf-8", errors="replace")
+        assert "https://audio.podigee-cdn.net/ep.mp3" in body
+        assert "whisper-large-v3-turbo" in body
+        assert "language" in body and "de" in body
