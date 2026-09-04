@@ -229,6 +229,18 @@ class TestGroqWhisperFallback:
         assert src == "rss-description"
         assert len(text) == 299
 
+    def test_key_alone_does_not_enable_asr(self, monkeypatch) -> None:
+        """VPS IP may be Cloudflare-banned — never auto-enable from key alone."""
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+        monkeypatch.delenv("PODCAST_GROQ_ASR", raising=False)
+        with patch.object(podcast_fetch, "_HERMES_ENV_PATH",
+                          Path("/nonexistent/.env")), \
+             patch.object(podcast_fetch, "transcribe_audio_url_via_groq") as groq:
+            assert podcast_fetch._groq_asr_enabled() is False
+            text, src = podcast_fetch.fetch_transcript(self._make_ep())
+        assert src == "rss-description"
+        groq.assert_not_called()
+
     def test_groq_success_preferred_over_description(self, monkeypatch) -> None:
         monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
         monkeypatch.setenv("PODCAST_GROQ_ASR", "1")
@@ -244,6 +256,7 @@ class TestGroqWhisperFallback:
 
     def test_json_still_beats_groq(self, monkeypatch) -> None:
         monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+        monkeypatch.setenv("PODCAST_GROQ_ASR", "1")
         ep = self._make_ep(
             transcript_url="https://example.com/t.json",
             transcript_type="application/json",
@@ -269,6 +282,7 @@ class TestGroqWhisperFallback:
 
     def test_groq_short_result_falls_to_description(self, monkeypatch) -> None:
         monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+        monkeypatch.setenv("PODCAST_GROQ_ASR", "1")
         with patch.object(
             podcast_fetch, "transcribe_audio_url_via_groq",
             return_value="too short",
@@ -285,8 +299,16 @@ class TestGroqWhisperFallback:
         assert src == "rss-description"
         groq.assert_not_called()
 
+    def test_cloudflare_1010_detected(self) -> None:
+        body = (
+            "<!DOCTYPE html><html><body>error code: 1010</body></html>"
+        )
+        assert podcast_fetch._is_cloudflare_ip_ban(403, body) is True
+        assert podcast_fetch._is_cloudflare_ip_ban(403, "normal api error") is False
+
     def test_encode_multipart_and_request_shape(self, monkeypatch) -> None:
         monkeypatch.setenv("GROQ_API_KEY", "gsk_test_key")
+        monkeypatch.setenv("PODCAST_GROQ_ASR", "1")
         monkeypatch.setenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
         captured = {}
 

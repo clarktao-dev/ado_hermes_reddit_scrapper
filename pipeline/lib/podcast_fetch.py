@@ -17,10 +17,11 @@ This module handles the cases transparently:
   2. <podcast:transcript type="text/vtt"> — fallback (parsed inline; we
      strip cue headers and Speaker labels so the resulting "text" is
      plain prose)
-  3. Groq Whisper ASR on the enclosure MP3 URL — when RSS has no
-     transcript tags (common: only ~13/329 L'Immo episodes ship JSON/VTT).
-     Enabled when ``GROQ_API_KEY`` is set. Uses Groq's ``url`` form field
-     so we never download the full MP3 locally.
+  3. Groq Whisper ASR on the enclosure MP3 URL — **opt-in only**
+     (``PODCAST_GROQ_ASR=1`` + ``GROQ_API_KEY``). Some VPS / datacenter
+     IPs are Cloudflare-banned by Groq (error 1010); do not auto-enable
+     just because a key is present. Uses Groq's ``url`` form field so we
+     never download the full MP3 locally.
   4. No transcript + no ASR — fall back to the RSS <description> field
      (guest bio / chapter outline; often <500 chars).
 
@@ -31,8 +32,8 @@ Design constraints
   reuse the same downstream stages (digest → translate → vault).
 - No hard dependency on the ``groq`` SDK — ASR uses stdlib urllib +
   multipart form (same style as the RSS fetcher).
-- One network call per transcript (VTT/JSON); Groq ASR is opt-in and
-  typically a few seconds for a full episode.
+- One network call per transcript (VTT/JSON); Groq ASR is **explicit
+  opt-in** (``PODCAST_GROQ_ASR=1``) because Groq may block datacenter IPs.
 - Returns a non-empty string — description is the last-resort floor.
 
 Skipped for now (documented as future work):
@@ -303,11 +304,30 @@ def _load_env_value(key: str) -> Optional[str]:
 
 
 def _groq_asr_enabled() -> bool:
-    """Opt-out via ``PODCAST_GROQ_ASR=0``; otherwise on when a key is present."""
-    flag = (_load_env_value("PODCAST_GROQ_ASR") or "1").strip().lower()
-    if flag in ("0", "false", "off", "no"):
+    """Require **explicit** ``PODCAST_GROQ_ASR=1`` plus ``GROQ_API_KEY``.
+
+    Default is **off** even when a key is present. Groq/Cloudflare often
+    returns error 1010 for datacenter VPS IPs; auto-enabling on key alone
+    caused silent ASR failure → short description → daily pending noise
+    (incident follow-up 2026-09-04).
+    """
+    flag = (_load_env_value("PODCAST_GROQ_ASR") or "0").strip().lower()
+    if flag not in ("1", "true", "on", "yes"):
         return False
     return bool(_load_env_value("GROQ_API_KEY"))
+
+
+def _is_cloudflare_ip_ban(status: int, body: str) -> bool:
+    """Detect Groq/Cloudflare datacenter IP bans (error 1010 / 1020)."""
+    if status not in (403, 503):
+        return False
+    low = (body or "").lower()
+    return (
+        "error code: 1010" in low
+        or "error code: 1020" in low
+        or "cloudflare" in low and "banned" in low
+        or "attention required" in low
+    )
 
 
 def _encode_multipart_form(fields: dict[str, str]) -> tuple[bytes, str]:
@@ -339,6 +359,9 @@ def transcribe_audio_url_via_groq(
     Uses the ``url`` form field so Groq fetches the enclosure directly
     (avoids downloading 20–40 MB MP3s into the pipeline host). Returns
     ``None`` when disabled, misconfigured, or the API call fails.
+
+    Requires ``PODCAST_GROQ_ASR=1`` and ``GROQ_API_KEY``. On Cloudflare
+    IP ban (1010) logs an explicit error so ops can disable ASR.
     """
     if not audio_url:
         return None
@@ -376,13 +399,22 @@ def transcribe_audio_url_via_groq(
     except urllib.error.HTTPError as e:
         err_body = ""
         try:
-            err_body = e.read().decode("utf-8", errors="replace")[:300]
+            err_body = e.read().decode("utf-8", errors="replace")[:500]
         except Exception:  # noqa: BLE001
             pass
-        logger.warning(
-            "groq whisper HTTP %s for %s: %s",
-            e.code, audio_url[:80], err_body or e.reason,
-        )
+        if _is_cloudflare_ip_ban(e.code, err_body):
+            logger.error(
+                "groq whisper BLOCKED by Cloudflare (HTTP %s, likely error "
+                "1010 datacenter IP ban) for %s — set PODCAST_GROQ_ASR=0 "
+                "until IP is allowlisted or switch to local faster-whisper. "
+                "body=%s",
+                e.code, audio_url[:80], err_body[:200],
+            )
+        else:
+            logger.warning(
+                "groq whisper HTTP %s for %s: %s",
+                e.code, audio_url[:80], err_body or e.reason,
+            )
         return None
     except Exception as e:  # noqa: BLE001
         logger.warning(
@@ -409,7 +441,8 @@ def fetch_transcript(episode: PodcastEpisode) -> tuple[str, str]:
     Tries, in order:
       1. The <podcast:transcript> JSON URL (already structured)
       2. The <podcast:transcript> VTT URL (parsed to prose)
-      3. Groq Whisper ASR on ``episode.audio_url`` (when ``GROQ_API_KEY`` set)
+      3. Groq Whisper ASR on ``episode.audio_url``
+         (only when ``PODCAST_GROQ_ASR=1`` and ``GROQ_API_KEY`` are set)
       4. RSS <description> field (capped at 500 chars upstream)
     Always returns a non-empty string — the description is the floor.
     """
@@ -430,8 +463,8 @@ def fetch_transcript(episode: PodcastEpisode) -> tuple[str, str]:
         if text:
             return text, "podcast-transcript-vtt"
 
-    # 3. Groq Whisper on enclosure (incident 2026-09-04: many eps have audio
-    # but no <podcast:transcript> tags — description-only is too short for LLM).
+    # 3. Groq Whisper on enclosure — explicit opt-in only (VPS IP may be
+    # Cloudflare-banned; never auto-enable from key alone).
     if episode.audio_url and _groq_asr_enabled():
         asr = transcribe_audio_url_via_groq(episode.audio_url, language="de")
         if asr and len(asr) >= 500:
