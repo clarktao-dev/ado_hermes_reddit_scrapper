@@ -10,41 +10,48 @@ Why this module exists
 l'Immo stopped publishing on YouTube but still posts weekly on the Haufe/
 Podigee-hosted RSS. The hosting provider publishes VTT + JSON transcripts
 next to the MP3 audio, so we can ingest them without running our own ASR.
-This module handles the three cases transparently:
+This module handles the cases transparently:
 
   1. <podcast:transcript type="application/json"> — preferred (already
      {start, end, text} structured)
   2. <podcast:transcript type="text/vtt"> — fallback (parsed inline; we
      strip cue headers and Speaker labels so the resulting "text" is
      plain prose)
-  3. No transcript tag — fall back to the RSS <description> field,
-     which most Haufe/Podigee shows populate with a guest bio + chapter
-     outline (not full transcript, but better than nothing).
+  3. Groq Whisper ASR on the enclosure MP3 URL — when RSS has no
+     transcript tags (common: only ~13/329 L'Immo episodes ship JSON/VTT).
+     Enabled when ``GROQ_API_KEY`` is set. Uses Groq's ``url`` form field
+     so we never download the full MP3 locally.
+  4. No transcript + no ASR — fall back to the RSS <description> field
+     (guest bio / chapter outline; often <500 chars).
 
 Design constraints
 ------------------
 - Mirrors ``pipeline.lib.youtube_fetch.VideoMeta`` shape (``id``,
   ``title``, ``channel``, ``published``, ``duration``) so callers can
   reuse the same downstream stages (digest → translate → vault).
-- No new dependencies — stdlib only (urllib, xml.etree, json, re).
-- One network call per transcript (VTT/JSON); <500 ms typical.
-- Returns ``None`` if a transcript cannot be obtained — the caller
-  decides whether to log + skip or queue for manual ASR.
+- No hard dependency on the ``groq`` SDK — ASR uses stdlib urllib +
+  multipart form (same style as the RSS fetcher).
+- One network call per transcript (VTT/JSON); Groq ASR is opt-in and
+  typically a few seconds for a full episode.
+- Returns a non-empty string — description is the last-resort floor.
 
 Skipped for now (documented as future work):
-- Local faster-whisper ASR fallback (deferred — user opted for
-  description-only for now).
+- Local faster-whisper ASR fallback (when Groq is unavailable / offline).
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import urllib.error
 import urllib.request
+import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -54,6 +61,13 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
+
+# Groq OpenAI-compatible Whisper endpoint (Plan 11 follow-up, 2026-09-04).
+_GROQ_TRANSCRIPTIONS_URL = (
+    "https://api.groq.com/openai/v1/audio/transcriptions"
+)
+_DEFAULT_GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"
+_HERMES_ENV_PATH = Path("/root/.hermes/.env")
 
 
 # Podcast Index transcript namespace
@@ -269,13 +283,134 @@ def _parse_json_transcript_to_text(raw: str) -> Optional[str]:
     return "\n".join(parts).strip() or None
 
 
+def _load_env_value(key: str) -> Optional[str]:
+    """``os.environ`` first, then ``/root/.hermes/.env`` (Hermes cron layout)."""
+    val = os.environ.get(key)
+    if val and val.strip():
+        return val.strip()
+    if not _HERMES_ENV_PATH.exists():
+        return None
+    try:
+        for raw in _HERMES_ENV_PATH.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith(f"{key}="):
+                return line.split("=", 1)[1].strip() or None
+    except OSError:
+        return None
+    return None
+
+
+def _groq_asr_enabled() -> bool:
+    """Opt-out via ``PODCAST_GROQ_ASR=0``; otherwise on when a key is present."""
+    flag = (_load_env_value("PODCAST_GROQ_ASR") or "1").strip().lower()
+    if flag in ("0", "false", "off", "no"):
+        return False
+    return bool(_load_env_value("GROQ_API_KEY"))
+
+
+def _encode_multipart_form(fields: dict[str, str]) -> tuple[bytes, str]:
+    """Build a multipart/form-data body without third-party deps."""
+    boundary = f"----hermesBoundary{uuid.uuid4().hex}"
+    parts: list[bytes] = []
+    for name, value in fields.items():
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+        )
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    body = b"".join(parts)
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return body, content_type
+
+
+def transcribe_audio_url_via_groq(
+    audio_url: str,
+    *,
+    language: str = "de",
+    timeout: float = 300.0,
+) -> Optional[str]:
+    """Transcribe a remote audio URL with Groq Whisper.
+
+    Uses the ``url`` form field so Groq fetches the enclosure directly
+    (avoids downloading 20–40 MB MP3s into the pipeline host). Returns
+    ``None`` when disabled, misconfigured, or the API call fails.
+    """
+    if not audio_url:
+        return None
+    if not _groq_asr_enabled():
+        return None
+    api_key = _load_env_value("GROQ_API_KEY")
+    if not api_key:
+        return None
+
+    model = (
+        _load_env_value("GROQ_WHISPER_MODEL") or _DEFAULT_GROQ_WHISPER_MODEL
+    )
+    fields = {
+        "url": audio_url,
+        "model": model,
+        "language": language,
+        "response_format": "text",
+        "temperature": "0",
+    }
+    body, content_type = _encode_multipart_form(fields)
+    req = urllib.request.Request(
+        _GROQ_TRANSCRIPTIONS_URL,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": content_type,
+            "User-Agent": _USER_AGENT,
+            "Accept": "application/json, text/plain, */*",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        err_body = ""
+        try:
+            err_body = e.read().decode("utf-8", errors="replace")[:300]
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning(
+            "groq whisper HTTP %s for %s: %s",
+            e.code, audio_url[:80], err_body or e.reason,
+        )
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "groq whisper failed for %s: %s",
+            audio_url[:80], type(e).__name__,
+        )
+        return None
+
+    text = raw.strip()
+    # response_format=text usually returns plain text; some gateways wrap JSON.
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            text = (data.get("text") or "").strip()
+    return text or None
+
+
 def fetch_transcript(episode: PodcastEpisode) -> tuple[str, str]:
     """Return (text, source_label) for an episode.
 
     Tries, in order:
       1. The <podcast:transcript> JSON URL (already structured)
       2. The <podcast:transcript> VTT URL (parsed to prose)
-      3. RSS <description> field (capped at 500 chars upstream)
+      3. Groq Whisper ASR on ``episode.audio_url`` (when ``GROQ_API_KEY`` set)
+      4. RSS <description> field (capped at 500 chars upstream)
     Always returns a non-empty string — the description is the floor.
     """
     # 1. JSON
@@ -295,5 +430,22 @@ def fetch_transcript(episode: PodcastEpisode) -> tuple[str, str]:
         if text:
             return text, "podcast-transcript-vtt"
 
-    # 3. Description floor
+    # 3. Groq Whisper on enclosure (incident 2026-09-04: many eps have audio
+    # but no <podcast:transcript> tags — description-only is too short for LLM).
+    if episode.audio_url and _groq_asr_enabled():
+        asr = transcribe_audio_url_via_groq(episode.audio_url, language="de")
+        if asr and len(asr) >= 500:
+            logger.info(
+                "groq whisper ok for %s: %d chars",
+                episode.id[:40], len(asr),
+            )
+            return asr, "groq-whisper"
+        if asr:
+            logger.warning(
+                "groq whisper returned short text (%d chars) for %s; "
+                "falling through to description",
+                len(asr), episode.id[:40],
+            )
+
+    # 4. Description floor
     return episode.description or "(no description)", "rss-description"
