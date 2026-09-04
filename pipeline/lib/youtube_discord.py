@@ -137,6 +137,58 @@ def _split_chunks(text: str, max_chars: int = EMBED_MAX_CHARS) -> List[str]:
     return chunks
 
 
+def step_send_short_transcript_warning(
+    pending: list,
+    channel: str = "podcast",
+    dry_run: bool = False,
+) -> dict:
+    """Push a single warning embed for short-transcript pending cases.
+
+    Only call when ``pending`` is non-empty — clean runs must stay silent.
+    Plan 11 (incident 2026-09-04).
+    """
+    if not pending:
+        return {"n_embeds": 0, "errors": [], "channel": channel, "skipped": True}
+
+    lines = [
+        f"⚠️ 短 transcript 待審查 ({len(pending)} 集):",
+        "",
+    ]
+    for item in pending:
+        ch_name = item.get("channel_name") or item.get("channel_id") or "?"
+        vid = str(item.get("video_id") or "")
+        vid_short = vid if len(vid) <= 16 else f"{vid[:12]}…"
+        title = item.get("title") or "（無標題）"
+        n_chars = item.get("n_chars", 0)
+        lines.append(f"- {ch_name}: {vid_short}「{title}」({n_chars} chars)")
+    lines.extend([
+        "",
+        "自動跳過 LLM digest，vault 在 `_pending_review/ShortTranscript/`",
+        "明天 cron 會重抓（若 transcript 變長）",
+    ])
+    body = "\n".join(lines)
+    title = f"短 transcript 待審查 ({len(pending)})"
+
+    summary: dict = {
+        "n_embeds": 0,
+        "errors": [],
+        "channel": channel,
+        "pending_count": len(pending),
+    }
+    if dry_run:
+        summary["n_embeds"] = 1
+        summary["previews"] = [{"title": title, "len_chars": len(body)}]
+        return summary
+
+    mids = _send(channel, body, title=title)
+    if mids:
+        summary["n_embeds"] = 1
+        summary["message_ids"] = mids
+    else:
+        summary["errors"].append("short-transcript warning send failed")
+    return summary
+
+
 def step_send_discord(digests, channel: str = "podcast",
                       dry_run: bool = False) -> dict:
     """Push digests to Discord. Returns summary.

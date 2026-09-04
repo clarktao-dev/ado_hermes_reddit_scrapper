@@ -50,6 +50,78 @@ def _slug(text: str, max_len: int = 60) -> str:
     return s[:max_len] or "untitled"
 
 
+def step_write_short_transcript_pending(
+    pending: list,
+    repo_root: str,
+    date_str: str | None = None,
+) -> dict:
+    """Write short-transcript cases under ``_pending_review/ShortTranscript/``.
+
+    Plan 11 (incident 2026-09-04): preview / truncated transcripts must not
+    land in ``Daily/`` or the ProcessedStore ledger. Files contain the raw
+    transcript plus a metadata note — never an LLM digest. Callers should
+    keep these untracked (see repo ``.gitignore`` + push path filter).
+    """
+    repo = Path(repo_root)
+    if date_str is None:
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    out_dir = repo / "podcast-kb" / "vault" / "_pending_review" / "ShortTranscript"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    summary: dict = {"date": date_str, "written": [], "errors": []}
+    for item in pending:
+        try:
+            channel = re.sub(
+                r"[^A-Za-z0-9_\-]+", "-",
+                str(item.get("channel_id") or "unknown"),
+            ).strip("-") or "unknown"
+            video_id = re.sub(
+                r"[^A-Za-z0-9_\-]+", "_",
+                str(item.get("video_id") or "unknown"),
+            )[:80] or "unknown"
+            fname = f"{channel}_{video_id}_{date_str}.md"
+            path = out_dir / fname
+            n_chars = int(item.get("n_chars") or len(item.get("transcript") or ""))
+            is_premium = bool(item.get("is_premium", False))
+            title = item.get("title") or "（無標題）"
+            body = "\n".join([
+                f"# {title}",
+                "",
+                f"- **頻道**：{item.get('channel_name') or channel}",
+                f"- **channel_id**：`{item.get('channel_id') or ''}`",
+                f"- **episode / video id**：`{item.get('video_id') or ''}`",
+                f"- **transcript chars**：{n_chars}",
+                f"- **is_premium**：{is_premium}",
+                f"- **url**：{item.get('url') or ''}",
+                "",
+                "---",
+                "",
+                "> transcript < 500 chars, premium=False, skipped LLM digest, "
+                "awaiting review. Not mark_processed — next cron will retry "
+                "if the source publishes a longer transcript.",
+                "",
+                "## Raw transcript",
+                "",
+                (item.get("transcript") or "").strip() or "（空）",
+                "",
+                "---",
+                "",
+                f"_pending review written "
+                f"{datetime.now(timezone.utc).isoformat()}_",
+            ])
+            path.write_text(body, encoding="utf-8")
+            summary["written"].append(str(path.relative_to(repo)))
+        except Exception as e:  # noqa: BLE001
+            summary["errors"].append({
+                "video_id": item.get("video_id"),
+                "error": str(e),
+            })
+
+    summary["n_files"] = len(summary["written"])
+    summary["n_errors"] = len(summary["errors"])
+    return summary
+
+
 def step_write_vault(digests, repo_root: str, date_str: str | None = None,
                      wipe: bool = True,
                      content_kind: str = "longform") -> dict:

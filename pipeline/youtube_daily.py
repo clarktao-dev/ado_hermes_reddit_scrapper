@@ -15,6 +15,9 @@ processed_ids aren't re-processed). New marks go to the ledger, not state.json.
       (the full output Task 3/6 produced). Vault filename:
       ``<slug>_longform.md``. Writes ``article_type="long-form"``.
   5. write_vault     — wipe + write podcast-kb/vault/Daily/<date>/
+  5b. short-transcript gate (Plan 11, 2026-09-04) — non-premium transcripts
+      under 500 chars go to ``_pending_review/ShortTranscript/`` + Discord
+      warning; **not** mark_processed so the next cron can retry
   6. send_discord    — push to channel `podcast` (alias)
   7. push_to_github  — git add + commit + push via existing paramiko script
   8. update_side_effects — backfill discord_message_id + github_commit_sha into
@@ -194,6 +197,49 @@ def _short_llm_temperature() -> float:
 SHORT_LLM_TEMPERATURE = _short_llm_temperature()
 # Initial call + up to 2 anti-stub retries (3 LLM calls max).
 SHORT_STUB_MAX_ATTEMPTS = 3
+
+# Plan 11 (incident 2026-09-04): Podigee premium=False preview transcripts
+# around ~300 chars make the short-mode LLM emit placeholder stubs. Gate
+# anything under this floor (non-premium) into _pending_review instead of
+# LLM digest + mark_processed — so tomorrow's cron can retry.
+SHORT_TRANSCRIPT_MIN_CHARS = 500
+
+
+def _is_short_non_premium_transcript(
+    tr: youtube_fetch.TranscriptResult,
+    *,
+    min_chars: int = SHORT_TRANSCRIPT_MIN_CHARS,
+) -> bool:
+    """True when transcript is too short for LLM digest and not premium.
+
+    Empty text counts (len 0 < min_chars). Premium=True bypasses the gate
+    so a future full-but-short premium transcript can still digest.
+    Does **not** replace stub/error-page detection — callers still run
+    ``_is_stub_transcript`` first.
+    """
+    if tr.is_premium:
+        return False
+    return len(tr.text or "") < min_chars
+
+
+def _short_transcript_pending_record(
+    ch: dict,
+    video: youtube_fetch.VideoMeta,
+    tr: youtube_fetch.TranscriptResult,
+) -> dict:
+    """Build a pending-review record for Discord warn + vault write."""
+    return {
+        "channel_id": ch.get("id", ""),
+        "channel_name": ch.get("name", ""),
+        "video_id": video.id,
+        "title": video.title,
+        "n_chars": len(tr.text or ""),
+        "is_premium": bool(tr.is_premium),
+        "transcript": tr.text or "",
+        "url": video.url,
+        "epoch": video.epoch,
+        "source_type": _ledger_source_type(ch),
+    }
 
 
 def pick_channels(channels: list, n: int = 4) -> list:
@@ -597,7 +643,9 @@ def push_to_github(vault_root: str, dry_run: bool) -> dict:
     msg = f"podcast-kb: {today} daily digest"
 
     cmds = [
-        ["git", "-C", vault_root, "add", f"{PODCAST_VAULT_GIT_PATH}/"],
+        # Only stage Daily/ digests — never _pending_review/ShortTranscript/
+        # (Plan 11: short-transcript previews stay local / untracked).
+        ["git", "-C", vault_root, "add", f"{PODCAST_VAULT_GIT_PATH}/Daily/"],
         ["git", "-C", vault_root, "-c", "user.email=ado@hermes.local", "-c",
          "user.name=Ado", "commit", "-m", msg],
     ]
@@ -749,11 +797,15 @@ def _process_one_channel(
     state: youtube_state.StateStore,
     args: argparse.Namespace,
     forced_video: youtube_fetch.VideoMeta | None = None,
+    short_transcript_pending: list | None = None,
 ) -> tuple[dict, youtube_fetch.VideoMeta, youtube_translate.VideoDigest] | None:
     """Fetch + translate + digest one channel. Returns None on skip.
 
     Raises on unexpected errors so the caller (L2 isolation) can log + continue.
     ``SystemExit`` / ``KeyboardInterrupt`` are not caught here — they propagate.
+
+    Short non-premium transcripts (Plan 11) append to ``short_transcript_pending``
+    and return None — no LLM digest, no mark_processed — so the next cron retries.
     """
     print(f"\n=== {ch['name']} ({ch['id']}) "
           f"[{_ledger_source_type(ch)}] ===")
@@ -815,12 +867,31 @@ def _process_one_channel(
         idx += 1
         if idx >= len(candidates):
             print(f"  [skip] exhausted {len(candidates)} candidate(s) "
-                  f"in {ch['id']}; none had transcripts")
-            v = None
+                  f"in {ch['id']}; none had usable transcripts")
+            # Keep last (v, tr) so the short-transcript gate can pending
+            # empty/non-premium cases instead of silently dropping them.
             break
         v = candidates[idx]
 
-    if v is None or tr is None or not tr.text:
+    if v is None or tr is None:
+        return None
+
+    # Plan 11 — short / empty non-premium → pending review (no LLM, no ledger).
+    if _is_short_non_premium_transcript(tr):
+        n_chars = len(tr.text or "")
+        print(
+            f"  [short-transcript] {n_chars} chars "
+            f"(premium={tr.is_premium}) < {SHORT_TRANSCRIPT_MIN_CHARS}; "
+            f"skipping LLM digest → pending review "
+            f"(will retry next cron, not mark_processed)"
+        )
+        if short_transcript_pending is not None:
+            short_transcript_pending.append(
+                _short_transcript_pending_record(ch, v, tr),
+            )
+        return None
+
+    if not tr.text:
         return None
 
     print(f"  [transcript] {tr.n_chars} chars (premium={tr.is_premium})")
@@ -926,6 +997,7 @@ def main() -> int:
 
     digests = []
     selected: list[tuple[dict, youtube_fetch.VideoMeta, youtube_translate.VideoDigest]] = []
+    short_transcript_pending: list[dict] = []
     n_channels_attempted = 0
     n_channels_failed: list[tuple[str, str, str]] = []
 
@@ -944,6 +1016,7 @@ def main() -> int:
                 state=state,
                 args=args,
                 forced_video=(forced_video if (forced_video is not None and i == 0) else None),
+                short_transcript_pending=short_transcript_pending,
             )
         except (SystemExit, KeyboardInterrupt):
             raise
@@ -967,14 +1040,57 @@ def main() -> int:
               f"failed={len(n_channels_failed)} "
               f"ids={[f[0] for f in n_channels_failed]}")
 
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    content_kind = "short-summary" if args.mode == "short" else "longform"
+    vault_root = str(VAULT_ROOT)
+
+    # Plan 11 — short-transcript pending review (before formal Daily vault).
+    # Only fires when there is at least one case (no noise on clean runs).
+    if short_transcript_pending:
+        print(f"\n=== Step 4b: short-transcript pending review "
+              f"({len(short_transcript_pending)}) ===")
+        if args.dry_run:
+            for item in short_transcript_pending:
+                print(
+                    f"  [dry-run] would write _pending_review/ShortTranscript/ "
+                    f"{item['channel_id']}_{item['video_id']}_{today_str}.md "
+                    f"({item['n_chars']} chars)"
+                )
+            pending_summary = {
+                "n_files": 0, "n_errors": 0, "dry_run": True,
+                "written": [],
+            }
+        else:
+            pending_summary = youtube_obsidian.step_write_short_transcript_pending(
+                short_transcript_pending,
+                repo_root=vault_root,
+                date_str=today_str,
+            )
+            print(
+                f"  wrote {pending_summary.get('n_files', 0)} pending file(s), "
+                f"errors={pending_summary.get('n_errors', 0)}"
+            )
+        warn_summary = youtube_discord.step_send_short_transcript_warning(
+            short_transcript_pending, channel="podcast", dry_run=args.dry_run,
+        )
+        print(
+            f"  warning embeds: {warn_summary.get('n_embeds', 0)}, "
+            f"errors={len(warn_summary.get('errors', []))}"
+        )
+
     if not digests:
+        if short_transcript_pending:
+            print(
+                f"\n[done] {len(short_transcript_pending)} short-transcript "
+                f"pending review; no digests produced "
+                f"(attempted={n_channels_attempted} "
+                f"failed={len(n_channels_failed)})"
+            )
+            return 0
         print("\n[nothing to process] no digests produced")
         return 0
 
     print(f"\n=== Step 5: write_vault ===")
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    content_kind = "short-summary" if args.mode == "short" else "longform"
-    vault_root = str(VAULT_ROOT)
     if args.dry_run:
         vault_summary = {
             "n_files": 0,
