@@ -32,6 +32,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -319,7 +320,6 @@ def fetch_and_parse(source_config: Dict[str, Any]) -> DestatisDataset:
     name_zh = source_config.get("name_zh", name_de)
     url = source_config["url"]
     name = source_config.get("name", name_de)
-    reference_period = source_config.get("reference_period", "latest")
 
     logger.info("[destatis] 開始抓取 %s (%s)", name_zh, source_id)
     file_path, encoding = fetch_csv(url)
@@ -330,8 +330,17 @@ def fetch_and_parse(source_config: Dict[str, Any]) -> DestatisDataset:
     ds.name = name
     ds.name_de = name_de
     ds.name_zh = name_zh
-    ds.reference_period = reference_period
     ds.url = url
+
+    # reference_period 推導策略:
+    #   - config 明確指定 → 用 config(覆寫任何從 CSV 推導的值)
+    #   - 否則 → 從實際 CSV rows 推導(讓 destatis 月度更新能翻篇 dedup key)
+    #   - 解析失敗 → "latest"(向後相容舊紀錄)
+    config_ref_period = source_config.get("reference_period")
+    if config_ref_period and config_ref_period != "latest":
+        ds.reference_period = config_ref_period
+    else:
+        ds.reference_period = _derive_reference_period(ds.rows)
     logger.info(
         "[destatis] 完成 %s: %d rows × %d cols, encoding=%s",
         source_id, len(ds.rows), len(ds.header), encoding,
@@ -342,6 +351,30 @@ def fetch_and_parse(source_config: Dict[str, Any]) -> DestatisDataset:
 # --------------------------------------------------------------------------- #
 # CLI smoke test
 # --------------------------------------------------------------------------- #
+
+def _derive_reference_period(rows: List[List[str]]) -> str:
+    """從已 parse 的 rows 推導 ``reference_period``,預設 ``"latest"``。
+
+    Destatis 主站公開 CSV 的時間序列第一欄格式為 ``"YYYY/MM/DD"``(例如
+    ``"2026/05/01"``)。對於有 header + 多列的時間序列,我們取最後一列
+    第一欄,轉成 ``YYYY-MM``。
+
+    對於橫斷面資料(第一欄是類別而非日期,如 ``investments_construction``
+    的 ``"Kategorie"``),我們回傳 ``"latest"`` 表示「最近一次發布」。
+
+    這個函式讓 dedup key ``destatis:{id}:{reference_period}`` 能隨 Destatis
+    月度更新自動翻篇,而不是永遠卡在 ``:latest``。
+    """
+    if len(rows) < 2:
+        return "latest"
+    last_first_cell = (rows[-1][0] or "").strip().strip('"')
+    # 嘗試解析 "YYYY/MM/DD" 或 "YYYY-MM-DD"
+    m = re.match(r"^(\d{4})[/\-](\d{1,2})(?:[/\-]\d{1,2})?$", last_first_cell)
+    if m:
+        year, month = m.group(1), f"{int(m.group(2)):02d}"
+        return f"{year}-{month}"
+    return "latest"
+
 
 def _load_first_enabled_source() -> Optional[Dict[str, Any]]:
     """讀 ``pipeline/config/destatis_sources.json``,回傳第一個 enabled source。"""
