@@ -1,0 +1,42 @@
+# Copy to config.toml and edit.
+#   cp config.example.toml config.toml
+
+[fetch]
+# Preferred caption languages, in order.
+languages = ["zh-Hant", "zh-TW", "zh", "zh-Hans", "en"]
+
+# Seconds to wait between jobs (min/max). Keeps traffic looking human.
+delay_min_sec = 4
+delay_max_sec = 10
+
+# Max jobs per day (0 = unlimited). Soft cap to avoid bans.
+daily_limit = 80
+
+# How long to sleep after HTTP 429 / bot blocks before retrying.
+backoff_base_sec = 30
+backoff_max_sec = 600
+max_retries = 3
+
+[yt_dlp]
+# Use a logged-in browser session on your Mac. Strongly recommended.
+# Options: safari | chrome | chromium | brave | edge | firefox
+cookies_from_browser = "safari"
+
+# Extra yt-dlp args (advanced). Leave empty unless you know you need them.
+extra_args = []
+
+[webhook]
+# Your online agent endpoint that accepts transcript JSON.
+# Leave empty to only save files locally under queue/done/.
+url = "https://YOUR-AGENT.example.com/hooks/transcript"
+# Optional shared secret header
+token = ""
+timeout_sec = 60
+
+[worker]
+# Poll inbox every N seconds when running as a daemon.
+poll_interval_sec = 20
+# Local HTTP port so other tools can enqueue URLs: POST /enqueue {"url":"..."}
+http_port = 8787
+# Bind only to localhost by default (safe). Use Cloudflare Tunnel if you need remote access.
+http_host = "127.0.0.1"

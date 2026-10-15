@@ -1,17 +1,22 @@
-# 複製欄位到你本機 youtube-mac-worker/config.toml（欄位名以套件 README 為準）
-# 此檔只是「對接 VPS」的建議值，不是完整 config。
+# 複製：cp config.example.toml config.toml
+# 再把下面幾行貼進／改掉（德國 Podcast 用 de）
 
-cookies_from_browser = "safari"
-request_delay_sec = 8
+[fetch]
+languages = ["de", "en", "zh-Hant", "zh-TW", "zh"]
+delay_min_sec = 4
+delay_max_sec = 10
 daily_limit = 40
-cooldown_on_429_sec = 1800
 
-# Mac worker 本機 HTTP（供 Cloudflare Tunnel / VPS enqueue）
-serve_host = "127.0.0.1"
-serve_port = 8787
+[yt_dlp]
+cookies_from_browser = "safari"   # 或 chrome；要跟你登入 YouTube 的瀏覽器一致
 
 [webhook]
-# VPS 上 mac_transcript_receiver.py 的位址
-url = "http://YOUR_VPS:8791/transcript"
-token = "REPLACE_WITH_MAC_WEBHOOK_TOKEN"
-# 若套件用 header 名稱不同，對齊 Authorization: Bearer <token>
+# VPS 上跑：pipeline/scripts/mac_transcript_receiver.py --port 8791
+url = "http://YOUR_VPS_IP:8791/hooks/transcript"
+token = "跟 VPS 的 MAC_WEBHOOK_TOKEN 相同"
+timeout_sec = 60
+
+[worker]
+poll_interval_sec = 20
+http_port = 8787
+http_host = "127.0.0.1"

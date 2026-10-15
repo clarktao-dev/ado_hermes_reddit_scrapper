@@ -84,7 +84,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
-        if path not in ("/transcript", "/webhook", "/v1/transcript"):
+        # /hooks/transcript matches youtube-mac-worker config.example.toml
+        if path not in (
+            "/transcript", "/webhook", "/v1/transcript", "/hooks/transcript",
+        ):
             self._send(404, {"ok": False, "error": "not found"})
             return
         if not _check_auth(self):
