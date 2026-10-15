@@ -1,0 +1,424 @@
+# Auto-exported from Hermes live cron — DO NOT edit by hand
+# Exported at: 2026-10-15T21:08:22+00:00
+# Source: Hermes cron on host `Hermes-Agent-VPS` (file: /root/.hermes/cron/jobs.json)
+# Job count: 10 (active: 10)
+# Regenerate: `cronjob_manage action=list` → /root/.hermes/cron/jobs.json
+#
+# Why this file exists:
+# Cursor Cloud Agent only sees repo files. This snapshot lets Cursor see the
+# live Hermes cron schedule without shelling into the production host.
+#
+# Secrets: prompt blocks all `source /root/.hermes/.env` (mode 600); we do NOT
+# record individual env keys here. The `env_source_file` field names the file.
+
+_header:
+  auto_exported: true
+  do_not_edit_by_hand: true
+  exported_at_utc: '2026-10-15T21:08:22+00:00'
+  source: Hermes cron on host `Hermes-Agent-VPS`
+  source_file: /root/.hermes/cron/jobs.json
+  regenerate_command: hermes cron list --json > /root/.hermes/cron/jobs.json
+  target_ids_status:
+    ac28419b2498 (youtube): still_active
+    b4af9754c582 (podcast): still_active
+  notes:
+  - Hermes cron runs in UTC. CEST/CET labels in name fields are display only.
+  - All 10 jobs source /root/.hermes/.env (mode 600) for secrets; individual env keys are NOT recorded here for
+    safety.
+  - script = null for all jobs = the agent is invoked (prompt-driven), not a shell script. The `command_block` shows
+    the bash block inside the prompt.
+  - b4af9754c582 (podcast) should become a thin shim that delegates to youtube_daily per Phase 2 — see HERMES_CRON_SNAPSHOT.md.
+version: 2
+timezone: UTC
+host: Hermes-Agent-VPS
+exported_at: '2026-10-15T21:08:22+00:00'
+job_count: 10
+jobs:
+- id: 9db9b4938a2f
+  name: germany_realestate_dresden_6zi
+  enabled: true
+  state: scheduled
+  paused: false
+  paused_reason: null
+  schedule_cron: 0 4 * * *
+  timezone: UTC
+  schedule_kind: cron
+  repeat_completed: 185
+  created_at: '2026-04-15T01:36:11.496155+00:00'
+  last_run_at: '2026-10-15T04:01:38.369217+00:00'
+  last_status: ok
+  last_error: null
+  last_delivery_error: null
+  last_dispatch_lateness_seconds: 18.9
+  failure_streak: 0
+  next_run_at: '2026-10-16T04:00:00+00:00'
+  command_block: null
+  cwd: null
+  interpreter: null
+  script: null
+  args: []
+  env_source_file: null
+  deliver_target: telegram:1179979897
+  skills:
+  - germany_real_estate_monitor_esmc
+  enabled_toolsets: null
+  model: minimax-m3
+  provider: ollama-cloud
+  no_agent: false
+  monitor_url: null
+  monitor_script: null
+  description: 'Uses skill: `germany_real_estate_monitor_esmc`'
+  tags: []
+  _target_ids_legacy: []
+- id: 93503a81dcc1
+  name: Memory Log Snapshot
+  enabled: true
+  state: scheduled
+  paused: false
+  paused_reason: null
+  schedule_cron: 0 0,6,12,18 * * *
+  timezone: UTC
+  schedule_kind: cron
+  repeat_completed: 428
+  created_at: '2026-06-30T18:50:39.685490+00:00'
+  last_run_at: '2026-10-15T18:01:58.872055+00:00'
+  last_status: ok
+  last_error: null
+  last_delivery_error: null
+  last_dispatch_lateness_seconds: 18.9
+  failure_streak: 0
+  next_run_at: '2026-10-16T00:00:00+00:00'
+  command_block: null
+  cwd: null
+  interpreter: null
+  script: null
+  args: []
+  env_source_file: null
+  deliver_target: local
+  skills:
+  - google-workspace
+  enabled_toolsets:
+  - delegation
+  model: minimax-m3
+  provider: ollama-cloud
+  no_agent: false
+  monitor_url: null
+  monitor_script: null
+  description: 'Uses skill: `google-workspace`'
+  tags: []
+  _target_ids_legacy: []
+- id: ac28419b2498
+  name: Daily YouTube Podcast (4:30 AM)
+  enabled: true
+  state: scheduled
+  paused: false
+  paused_reason: null
+  schedule_cron: 0 2 * * *
+  timezone: UTC
+  schedule_kind: cron
+  repeat_completed: 70
+  created_at: '2026-08-08T03:26:39.558348+00:00'
+  last_run_at: '2026-10-15T02:05:11.249245+00:00'
+  last_status: ok
+  last_error: null
+  last_delivery_error: null
+  last_dispatch_lateness_seconds: 18.9
+  failure_streak: 0
+  next_run_at: '2026-10-16T02:00:00+00:00'
+  command_block: 'cd /root/projects/ado_hermes_reddit_scrapper
+
+    set -a && source /root/.hermes/.env && set +a
+
+    /root/.hermes/hermes-agent/venv/bin/python pipeline/youtube_daily.py --mode short'
+  cwd: /root/projects/ado_hermes_reddit_scrapper
+  interpreter: /root/.hermes/hermes-agent/venv/bin/python
+  script: pipeline/youtube_daily.py
+  args:
+  - --mode
+  - short
+  env_source_file: /root/.hermes/.env
+  deliver_target: discord:1535461574460968960
+  skills: []
+  enabled_toolsets: null
+  model: minimax-m3
+  provider: ollama-cloud
+  no_agent: false
+  monitor_url: null
+  monitor_script: null
+  description: 跑 daily YouTube podcast pipeline。
+  tags:
+  - youtube
+  _target_ids_legacy:
+  - youtube-job (legacy id ac28419b2498)
+- id: 053a59e0721a
+  name: news_daily_cest_0500
+  enabled: true
+  state: scheduled
+  paused: false
+  paused_reason: null
+  schedule_cron: 0 3 * * *
+  timezone: UTC
+  schedule_kind: cron
+  repeat_completed: 68
+  created_at: '2026-08-09T22:22:39.610998+00:00'
+  last_run_at: '2026-10-15T03:20:23.962286+00:00'
+  last_status: ok
+  last_error: null
+  last_delivery_error: null
+  last_dispatch_lateness_seconds: 18.9
+  failure_streak: 0
+  next_run_at: '2026-10-16T03:00:00+00:00'
+  command_block: 'cd /root/projects/ado_hermes_reddit_scrapper
+
+    set -a && source /root/.hermes/.env && set +a
+
+    /root/.hermes/hermes-agent/venv/bin/python pipeline/news_daily.py'
+  cwd: /root/projects/ado_hermes_reddit_scrapper
+  interpreter: /root/.hermes/hermes-agent/venv/bin/python
+  script: pipeline/news_daily.py
+  args: []
+  env_source_file: /root/.hermes/.env
+  deliver_target: discord:1520791894995501106
+  skills: []
+  enabled_toolsets: null
+  model: minimax-m3
+  provider: ollama-cloud
+  no_agent: false
+  monitor_url: null
+  monitor_script: null
+  description: 跑 daily News pipeline。
+  tags: []
+  _target_ids_legacy: []
+- id: afec3bf1fea1
+  name: recommend_long_form_cest_tue_fri_0600
+  enabled: true
+  state: scheduled
+  paused: false
+  paused_reason: null
+  schedule_cron: 0 4 * * 2,5
+  timezone: UTC
+  schedule_kind: cron
+  repeat_completed: 19
+  created_at: '2026-08-09T22:22:44.595771+00:00'
+  last_run_at: '2026-10-13T04:02:54.559538+00:00'
+  last_status: ok
+  last_error: null
+  last_delivery_error: null
+  last_dispatch_lateness_seconds: 18.9
+  failure_streak: 0
+  next_run_at: '2026-10-16T04:00:00+00:00'
+  command_block: cd /root/projects/ado_hermes_reddit_scrapper && set -a && source /root/.hermes/.env && set +a &&
+    /root/.hermes/hermes-agent/venv/bin/python pipeline/scripts/recommend_long_form.py run --days-back 3
+  cwd: /root/projects/ado_hermes_reddit_scrapper
+  interpreter: /root/.hermes/hermes-agent/venv/bin/python
+  script: pipeline/scripts/recommend_long_form.py
+  args:
+  - run
+  - --days-back
+  - '3'
+  env_source_file: /root/.hermes/.env
+  deliver_target: discord:1537705289367953408
+  skills: []
+  enabled_toolsets: null
+  model: minimax-m3
+  provider: ollama-cloud
+  no_agent: false
+  monitor_url: null
+  monitor_script: null
+  description: 生成本週 long-form 候選清單(給 user 推薦用)。
+  tags: []
+  _target_ids_legacy: []
+- id: 2049d7a025c9
+  name: destatis_daily_weekly
+  enabled: true
+  state: scheduled
+  paused: false
+  paused_reason: null
+  schedule_cron: 0 1 * * 5
+  timezone: UTC
+  schedule_kind: cron
+  repeat_completed: 9
+  created_at: '2026-08-13T05:17:03.017374+00:00'
+  last_run_at: '2026-10-09T01:01:17.218933+00:00'
+  last_status: ok
+  last_error: null
+  last_delivery_error: null
+  last_dispatch_lateness_seconds: 18.9
+  failure_streak: 0
+  next_run_at: '2026-10-16T01:00:00+00:00'
+  command_block: 'cd /root/projects/ado_hermes_reddit_scrapper
+
+    set -a && source /root/.hermes/.env && set +a
+
+    /root/.hermes/hermes-agent/venv/bin/python -m pipeline.destatis_daily --push 2>&1 | tee ~/.hermes/cron/output/destatis_daily/$(date
+    -u +%Y-%m-%d).log'
+  cwd: /root/projects/ado_hermes_reddit_scrapper
+  interpreter: null
+  script: null
+  args: []
+  env_source_file: /root/.hermes/.env
+  deliver_target: local
+  skills: []
+  enabled_toolsets: null
+  model: minimax-m3
+  provider: ollama-cloud
+  no_agent: false
+  monitor_url: null
+  monitor_script: null
+  description: 執行 /root/projects/ado_hermes_reddit_scrapper/pipeline/destatis_daily.py 完整 pipeline (--push)。
+  tags: []
+  _target_ids_legacy: []
+- id: fac3cfe02519
+  name: cleanup_transcripts_weekly
+  enabled: true
+  state: scheduled
+  paused: false
+  paused_reason: null
+  schedule_cron: 0 5 * * 1
+  timezone: UTC
+  schedule_kind: cron
+  repeat_completed: 9
+  created_at: '2026-08-14T18:48:41.222139+00:00'
+  last_run_at: '2026-10-12T05:00:37.961220+00:00'
+  last_status: ok
+  last_error: null
+  last_delivery_error: null
+  last_dispatch_lateness_seconds: 18.9
+  failure_streak: 0
+  next_run_at: '2026-10-19T05:00:00+00:00'
+  command_block: null
+  cwd: null
+  interpreter: null
+  script: null
+  args: []
+  env_source_file: null
+  deliver_target: local
+  skills: []
+  enabled_toolsets: null
+  model: minimax-m3
+  provider: ollama-cloud
+  no_agent: false
+  monitor_url: null
+  monitor_script: null
+  description: Cleanup expired transcript cache entries (TTL = 30 days).
+  tags: []
+  _target_ids_legacy: []
+- id: 2686cfd36e23
+  name: reddit_daily_cest_0230
+  enabled: true
+  state: scheduled
+  paused: false
+  paused_reason: null
+  schedule_cron: 30 0 * * *
+  timezone: UTC
+  schedule_kind: cron
+  repeat_completed: 61
+  created_at: '2026-08-15T05:06:50.069373+00:00'
+  last_run_at: '2026-10-15T00:45:46.167544+00:00'
+  last_status: ok
+  last_error: null
+  last_delivery_error: null
+  last_dispatch_lateness_seconds: 18.9
+  failure_streak: 0
+  next_run_at: '2026-10-16T00:30:00+00:00'
+  command_block: 'cd /root/projects/ado_hermes_reddit_scrapper
+
+    set -a && source /root/.hermes/.env && set +a
+
+    /root/.hermes/hermes-agent/venv/bin/python -u pipeline/scripts/reddit_monitor.py'
+  cwd: /root/projects/ado_hermes_reddit_scrapper
+  interpreter: null
+  script: pipeline/scripts/reddit_monitor.py
+  args: []
+  env_source_file: /root/.hermes/.env
+  deliver_target: discord:1537907956132089976
+  skills: []
+  enabled_toolsets: null
+  model: minimax-m3
+  provider: ollama-cloud
+  no_agent: false
+  monitor_url: null
+  monitor_script: null
+  description: 跑 daily Reddit 精選 pipeline。
+  tags: []
+  _target_ids_legacy: []
+- id: b4af9754c582
+  name: Daily Podcast RSS (2:15 AM)
+  enabled: true
+  state: scheduled
+  paused: false
+  paused_reason: null
+  schedule_cron: 30 2 * * *
+  timezone: UTC
+  schedule_kind: cron
+  repeat_completed: 47
+  created_at: '2026-08-31T05:47:16.274546+00:00'
+  last_run_at: '2026-10-15T02:33:56.573933+00:00'
+  last_status: ok
+  last_error: null
+  last_delivery_error: null
+  last_dispatch_lateness_seconds: 18.9
+  failure_streak: 0
+  next_run_at: '2026-10-16T02:30:00+00:00'
+  command_block: 'cd /root/projects/ado_hermes_reddit_scrapper
+
+    set -a && source /root/.hermes/.env && set +a
+
+    PYTHONPATH=/root/projects/ado_hermes_reddit_scrapper /root/.hermes/hermes-agent/venv/bin/python pipeline/scripts/podcast_daily.py
+    --n-channels 1'
+  cwd: /root/projects/ado_hermes_reddit_scrapper
+  interpreter: /root/.hermes/hermes-agent/venv/bin/python
+  script: pipeline/scripts/podcast_daily.py
+  args:
+  - --n-channels
+  - '1'
+  env_source_file: /root/.hermes/.env
+  deliver_target: origin
+  skills: []
+  enabled_toolsets: null
+  model: minimax-m3
+  provider: ollama-cloud
+  no_agent: false
+  monitor_url: null
+  monitor_script: null
+  description: 跑 daily L'Immo podcast pipeline (Plan 10, 2026-08-31)。
+  tags:
+  - plan10
+  - podcast
+  _target_ids_legacy:
+  - podcast-job (legacy id b4af9754c582)
+- id: f22eb5baec7f
+  name: agent-persona-daily-backup
+  enabled: true
+  state: scheduled
+  paused: false
+  paused_reason: null
+  schedule_cron: 30 3 * * *
+  timezone: UTC
+  schedule_kind: cron
+  repeat_completed: 41
+  created_at: '2026-09-04T06:33:18.002313+00:00'
+  last_run_at: '2026-10-15T03:30:35.059668+00:00'
+  last_status: ok
+  last_error: null
+  last_delivery_error: null
+  last_dispatch_lateness_seconds: 18.9
+  failure_streak: 0
+  next_run_at: '2026-10-16T03:30:00+00:00'
+  command_block: null
+  cwd: null
+  interpreter: null
+  script: null
+  args: []
+  env_source_file: null
+  deliver_target: local
+  skills: []
+  enabled_toolsets: null
+  model: minimax-m3
+  provider: ollama-cloud
+  no_agent: false
+  monitor_url: null
+  monitor_script: null
+  description: 'Run the Hermes agent persona backup script. Execute:'
+  tags: []
+  _target_ids_legacy: []
