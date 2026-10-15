@@ -21,7 +21,27 @@ brew list yt-dlp >/dev/null 2>&1 || brew install yt-dlp
 brew upgrade yt-dlp >/dev/null 2>&1 || true
 
 echo "==> Python venv"
-python3 -m venv .venv
+# youtube-transcript-api does not support Python 3.15+ yet. Prefer 3.12/3.13.
+PY=""
+for cand in python3.13 python3.12 python3.11 python3; do
+  if command -v "$cand" >/dev/null 2>&1; then
+    ver="$("$cand" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+    major="${ver%%.*}"
+    minor="${ver#*.}"
+    if [[ "$major" -eq 3 && "$minor" -lt 15 ]]; then
+      PY="$cand"
+      break
+    fi
+  fi
+done
+if [[ -z "$PY" ]]; then
+  echo "Need Python 3.11–3.13 (3.15 is too new for youtube-transcript-api)."
+  echo "Install with:  brew install python@3.12"
+  exit 1
+fi
+echo "    using: $PY ($("$PY" -c 'import sys; print(sys.version.split()[0])'))"
+rm -rf .venv
+"$PY" -m venv .venv
 # shellcheck disable=SC1091
 source .venv/bin/activate
 pip install -U pip
