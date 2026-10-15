@@ -62,22 +62,32 @@ cp launchd/com.yt.mac.worker.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.yt.mac.worker.plist
 ```
 
-可選：開本機 API 讓 VPS 遠端丟片
+開本機 API，讓 VPS 經 **Tailscale** 丟片（你已有 Tailscale，不必 Cloudflare）：
 
 ```bash
-.venv/bin/python -m worker serve          # 127.0.0.1:8787
-# 另開一個終端：cloudflared tunnel --url http://127.0.0.1:8787
+# config.toml：
+# [worker]
+# http_host = "0.0.0.0"    # 重要：讓 Tailscale 網卡打得到
+# http_port = 8787
+
+.venv/bin/python -m worker serve
+# 另開終端吃佇列：
+.venv/bin/python -m worker run
+
+# 查 Mac 的 Tailscale IP：
+tailscale ip -4
+# 例如 100.x.y.z
 ```
 
 ---
 
-## VPS 上做一次
+## VPS 上做一次（Tailscale）
 
 ```bash
 # /root/.hermes/.env 加上：
 YOUTUBE_TRANSCRIPT_SOURCE=mac
 MAC_WEBHOOK_TOKEN=跟Mac config.toml 的 token 相同
-MAC_WORKER_URL=https://xxxx.trycloudflare.com   # 可選；有 tunnel 才填
+MAC_WORKER_URL=http://100.x.y.z:8787     # ← Mac 的 Tailscale IP
 MAC_RECEIVER_PORT=8791
 
 cd /root/projects/ado_hermes_reddit_scrapper
@@ -85,6 +95,22 @@ git pull   # 含有 mac_transcript_receiver 的 branch / merge 後的 main
 
 set -a && source /root/.hermes/.env && set +a
 PYTHONPATH=. python pipeline/scripts/mac_transcript_receiver.py --port 8791
+```
+
+Mac `config.toml` 的 webhook 也建議打 VPS 的 Tailscale IP（不必公網）：
+
+```toml
+[webhook]
+url = "http://100.VPS的IP:8791/hooks/transcript"
+token = "同一組"
+```
+
+互通測試（在 VPS 上）：
+```bash
+curl -s http://100.Mac的IP:8787/health
+curl -s -X POST http://100.Mac的IP:8787/enqueue \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://www.youtube.com/watch?v=VIDEO_ID"}'
 ```
 
 ---
