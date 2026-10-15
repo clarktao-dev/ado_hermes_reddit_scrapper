@@ -19,6 +19,11 @@
 #    1539010288026779688(#挑文區),問 user 怎麼處理每則 ✅。
 #    Plan 4 上線即啟用(``enabled: true``)。
 #
+# 3. Plan 6 (設計中 — 見 docs/CONTENT_REVIEW_PIPELINE.md):
+#    將「週回顧問意圖」升級/並行為「每兩天自動寫草稿 → #審核區 →
+#    人審通過才 publish」。新 job 名稱暫定 ``draft_batch_every_2d`` +
+#    ``publish_approved``;尚未 enabled,實作前勿開。
+#
 # 配套 daemon
 # -----------
 # ``discord_picks.py`` 是**長跑 daemon**(非 cron 一次性)— Plan 4 改成

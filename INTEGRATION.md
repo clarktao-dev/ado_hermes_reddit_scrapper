@@ -1,5 +1,9 @@
 # ProcessedContent ledger — integration guide (Firestore)
 
+> **Plan 6 (draft → human review → publish):** see
+> [`docs/CONTENT_REVIEW_PIPELINE.md`](docs/CONTENT_REVIEW_PIPELINE.md).
+> Reaction picks stay here; publish must never skip `content_jobs.status=approved`.
+
 This ledger records every item the pipeline has already processed so the
 `youtube_daily.py`, `news_daily.py`, and future `reddit_daily.py` /
 `podcast_daily.py` runs can skip duplicates and track side effects
