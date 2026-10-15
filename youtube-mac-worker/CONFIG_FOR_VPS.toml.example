@@ -1,0 +1,17 @@
+# 複製欄位到你本機 youtube-mac-worker/config.toml（欄位名以套件 README 為準）
+# 此檔只是「對接 VPS」的建議值，不是完整 config。
+
+cookies_from_browser = "safari"
+request_delay_sec = 8
+daily_limit = 40
+cooldown_on_429_sec = 1800
+
+# Mac worker 本機 HTTP（供 Cloudflare Tunnel / VPS enqueue）
+serve_host = "127.0.0.1"
+serve_port = 8787
+
+[webhook]
+# VPS 上 mac_transcript_receiver.py 的位址
+url = "http://YOUR_VPS:8791/transcript"
+token = "REPLACE_WITH_MAC_WEBHOOK_TOKEN"
+# 若套件用 header 名稱不同，對齊 Authorization: Bearer <token>
