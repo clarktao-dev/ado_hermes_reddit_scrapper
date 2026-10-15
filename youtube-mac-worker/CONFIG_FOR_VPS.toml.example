@@ -11,12 +11,14 @@ daily_limit = 40
 cookies_from_browser = "safari"   # 或 chrome；要跟你登入 YouTube 的瀏覽器一致
 
 [webhook]
+# 建議走 Tailscale（VPS 的 100.x 位址），不必開公網
 # VPS 上跑：pipeline/scripts/mac_transcript_receiver.py --port 8791
-url = "http://YOUR_VPS_IP:8791/hooks/transcript"
+url = "http://100.VPS.x.y:8791/hooks/transcript"
 token = "跟 VPS 的 MAC_WEBHOOK_TOKEN 相同"
 timeout_sec = 60
 
 [worker]
 poll_interval_sec = 20
 http_port = 8787
-http_host = "127.0.0.1"
+# Tailscale 互連時改 0.0.0.0，讓 VPS 打得到 /enqueue
+http_host = "0.0.0.0"
