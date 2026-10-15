@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Optional: local HTTP enqueue API on 127.0.0.1:8787
+  Pair with `com.yt.mac.worker` (run) so jobs actually process.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.yt.mac.serve</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/REPLACE_ME/youtube-mac-worker</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/Users/REPLACE_ME/youtube-mac-worker/.venv/bin/python</string>
+      <string>-m</string>
+      <string>worker</string>
+      <string>serve</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/REPLACE_ME/youtube-mac-worker/.state/serve.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/REPLACE_ME/youtube-mac-worker/.state/serve.err.log</string>
+  </dict>
+</plist>

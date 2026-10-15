@@ -1,0 +1,4 @@
+youtube-transcript-api>=1.0.0,<2
+requests>=2.31.0,<3
+toml>=0.10.2,<1
+yt-dlp>=2024.1.0

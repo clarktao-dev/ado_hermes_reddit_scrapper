@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Install on your Mac (edit WorkingDirectory / paths first):
+
+    cp launchd/com.yt.mac.worker.plist ~/Library/LaunchAgents/
+    # edit ProgramArguments paths inside the copied plist
+    launchctl load ~/Library/LaunchAgents/com.yt.mac.worker.plist
+
+  Unload:
+    launchctl unload ~/Library/LaunchAgents/com.yt.mac.worker.plist
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.yt.mac.worker</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/REPLACE_ME/youtube-mac-worker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/Users/REPLACE_ME/youtube-mac-worker/.venv/bin/python</string>
+      <string>-m</string>
+      <string>worker</string>
+      <string>run</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/REPLACE_ME/youtube-mac-worker/.state/worker.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/REPLACE_ME/youtube-mac-worker/.state/worker.err.log</string>
+
+    <!-- Prevent Mac from sleeping the job when possible (still keep lid open / power connected). -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+  </dict>
+</plist>
