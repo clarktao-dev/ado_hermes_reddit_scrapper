@@ -391,25 +391,29 @@ def list_channel_videos(channel_id: str, channel_name: str, channel_url: str,
 def fetch_transcript(video: VideoMeta, timeout: int = 30,
                      max_chars: int = 200_000,
                      write_cache: bool = True) -> TranscriptResult:
-    """Fetch transcript via kome.ai, optionally persist to the transcript cache.
+    """Resolve a transcript for ``video`` without scraping YouTube on the VPS.
 
-    The cache (immobilien-kb/vault/YouTube/<Channel>/_transcripts/<video_id>.md)
-    is the source of truth for long-form re-runs within the 30-day TTL window —
-    see ``pipeline.lib.transcript_cache`` for the cleanup contract.
+    Resolution order depends on ``YOUTUBE_TRANSCRIPT_SOURCE``:
 
-    If the cache already has a non-expired entry for this video, return it
-    directly without hitting kome.ai. Set ``write_cache=False`` (e.g. from
-    ``youtube_daily --dry-run``) to fetch without persisting new cache files.
-    Returns text='' / language='none' when both the network call and the cache
-    miss — the caller decides whether to skip the video or fall back to a
-    YouTube HTML scrape.
+    * ``mac``  — read ``transcript_cache`` only (filled by Mac worker webhook).
+      On miss, best-effort enqueue to ``MAC_WORKER_URL`` and return empty so
+      today's run skips; tomorrow's cron picks up the cached text.
+    * ``kome`` — legacy: cache → kome.ai (no direct YouTube caption request).
+    * ``auto`` (default) — cache first, then kome.ai.
+
+    VPS never calls YouTube caption endpoints directly. Caption fetch lives on
+    the residential Mac (``youtube-mac-worker``).
     """
-    # Cheap check first: if a fresh cached transcript exists, use it.
+    from pipeline.lib import mac_transcript  # noqa: PLC0415
+    mode = mac_transcript.transcript_source_mode()
+
+    # 1. Cache (channel folder or Mac inbox).
     try:
-        from pipeline.lib import transcript_cache
-        cached = transcript_cache.read_cached_transcript(video.channel_name, video.id)
+        from pipeline.lib import stub_detection
+        cached = mac_transcript.read_mac_or_channel_cache(
+            video.channel_name, video.id,
+        )
         if cached is not None:
-            from pipeline.lib import stub_detection
             if stub_detection.is_stub_transcript(cached.text):
                 logger.warning(
                     "cached transcript for %s looks like error-page stub; "
@@ -427,12 +431,26 @@ def fetch_transcript(video: VideoMeta, timeout: int = 30,
     except Exception:  # noqa: BLE001 — cache read is best-effort
         pass
 
+    # 2. Mac-only mode: enqueue + empty (no kome, no YouTube).
+    if mode == "mac":
+        mac_transcript.maybe_enqueue_on_cache_miss(video.id, video.url)
+        logger.info(
+            "mac mode: no cached transcript for %s — skipping (await Mac fetch)",
+            video.id,
+        )
+        return TranscriptResult(
+            video=video, language="none", text="", n_chars=0,
+            is_premium=False,
+        )
+
+    # 3. Legacy / auto: kome.ai third-party transcript API.
     payload = {"video_id": video.id, "format": "true"}
     try:
         resp = requests.post(_KOME_URL, json=payload, headers=_KOME_HEADERS,
                              timeout=timeout)
         resp.raise_for_status()
     except requests.RequestException as e:
+        logger.warning("kome.ai fetch failed for %s: %s", video.id, e)
         return TranscriptResult(
             video=video, language="none", text="", n_chars=0,
             is_premium=False,
@@ -454,9 +472,7 @@ def fetch_transcript(video: VideoMeta, timeout: int = 30,
             video=video, language="none", text="", n_chars=0,
             is_premium=bool(data.get("isPremium")),
         )
-    # kome.ai returns language based on what YouTube has; we don't need to detect it
     truncated = text[:max_chars]
-    # Persist to the transcript cache so long-form re-runs can skip kome.ai.
     if write_cache:
         try:
             from pipeline.lib import transcript_cache

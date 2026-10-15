@@ -1,0 +1,24 @@
+# 複製：cp config.example.toml config.toml
+# 再把下面幾行貼進／改掉（德國 Podcast 用 de）
+
+[fetch]
+languages = ["de", "en", "zh-Hant", "zh-TW", "zh"]
+delay_min_sec = 4
+delay_max_sec = 10
+daily_limit = 40
+
+[yt_dlp]
+cookies_from_browser = "safari"   # 或 chrome；要跟你登入 YouTube 的瀏覽器一致
+
+[webhook]
+# 建議走 Tailscale（VPS 的 100.x 位址），不必開公網
+# VPS 上跑：pipeline/scripts/mac_transcript_receiver.py --port 8791
+url = "http://100.VPS.x.y:8791/hooks/transcript"
+token = "跟 VPS 的 MAC_WEBHOOK_TOKEN 相同"
+timeout_sec = 60
+
+[worker]
+poll_interval_sec = 20
+http_port = 8787
+# Tailscale 互連時改 0.0.0.0，讓 VPS 打得到 /enqueue
+http_host = "0.0.0.0"
