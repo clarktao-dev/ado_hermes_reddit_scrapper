@@ -28,9 +28,13 @@ VPS 仍然**只做 AI 整理**，不抓 YouTube。
    - 不要勾 Core Data
 3. 把本目錄 `YTCaptions/` 裡的 `.swift` 檔案拖進專案（勾 Copy items）
 4. 刪掉 Xcode 自動產生、重複的 `ContentView.swift` / `*App.swift`（留我們這份）
-5. 上方裝置選你的 **iPhone**（用線連或同一 Wi‑Fi + Developer Mode）
-6. Signing：Team 選你的 Apple ID（Personal Team）
-7. 按 ▶ Run
+5. **Target → Info** 加上（見 `Info-additions.plist`）：
+   - `App Transport Security Settings` → `Allow Arbitrary Loads` = YES  
+     （否則 `http://100.x` Tailscale 會被擋）
+   - `Privacy - Local Network Usage Description` =「需要經 Tailscale 把字幕傳送到 VPS」
+6. 上方裝置選你的 **iPhone**（用線連；開啟開發者模式）
+7. Signing：Team 選你的 Apple ID（Personal Team）
+8. 按 ▶ Run
 
 第一次可能要在 iPhone：**設定 → 一般 → VPN 與裝置管理** 信任開發者。
 
