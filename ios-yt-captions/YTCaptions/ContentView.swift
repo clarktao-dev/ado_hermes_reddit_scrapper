@@ -4,44 +4,48 @@ import UIKit
 struct ContentView: View {
     @StateObject private var settings = SettingsStore()
     @State private var urlText: String = ""
-    @State private var status: String = "貼上 YouTube 連結，按「抓取並傳送」。"
-    @State private var preview: String = ""
+    @State private var status: String = "按「同步佇列」：從 GitHub 撈 Agent 丟的連結。"
+    @State private var log: String = ""
     @State private var busy = false
     @State private var showSettings = false
 
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
+                Button {
+                    Task { await syncQueue() }
+                } label: {
+                    if busy {
+                        ProgressView().padding(.horizontal, 12)
+                    } else {
+                        Label("同步佇列（撈 GitHub → 抓字幕 → 上傳）", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(busy)
+
+                Divider()
+
+                Text("或手動處理一支")
+                    .font(.headline)
+
                 TextField("https://youtube.com/watch?v=…", text: $urlText, axis: .vertical)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
-                    .lineLimit(3...5)
-                    .padding(12)
+                    .lineLimit(2...4)
+                    .padding(10)
                     .background(Color(.secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
 
                 HStack {
-                    Button {
-                        if let clip = UIPasteboard.general.string {
-                            urlText = clip
-                        }
-                    } label: {
-                        Label("貼上", systemImage: "doc.on.clipboard")
+                    Button("貼上") {
+                        if let c = UIPasteboard.general.string { urlText = c }
                     }
                     .buttonStyle(.bordered)
 
-                    Spacer()
-
-                    Button {
-                        Task { await run() }
-                    } label: {
-                        if busy {
-                            ProgressView()
-                                .padding(.horizontal, 8)
-                        } else {
-                            Label("抓取並傳送", systemImage: "paperplane.fill")
-                        }
+                    Button("抓取並上傳 GitHub") {
+                        Task { await runOne(urlText: urlText, channel: "") }
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(busy || urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -51,17 +55,15 @@ struct ContentView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
-                if !preview.isEmpty {
-                    Text("預覽")
-                        .font(.headline)
+                if !log.isEmpty {
                     ScrollView {
-                        Text(preview)
-                            .font(.system(.footnote, design: .monospaced))
+                        Text(log)
+                            .font(.system(.caption, design: .monospaced))
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(8)
                     .background(Color(.secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
 
                 Spacer()
@@ -80,28 +82,110 @@ struct ContentView: View {
     }
 
     @MainActor
-    private func run() async {
+    private func syncQueue() async {
         busy = true
         defer { busy = false }
-        status = "抓取字幕中…"
-        preview = ""
+        log = ""
+        status = "讀取 GitHub inbox…"
         do {
-            let result = try await TranscriptFetcher.fetch(
-                urlString: urlText,
-                languages: settings.languageList
-            )
-            preview = String(result.text.prefix(1200))
-            status = "抓到 \(result.text.count) 字（\(result.language)）→ 傳送到 VPS…"
-            try await WebhookClient.post(
-                webhookURL: settings.webhookURL,
-                token: settings.webhookToken,
-                result: result,
-                originalURL: urlText
-            )
-            status = "✅ 已送到 VPS（\(result.videoID)）"
+            let files = try await settings.github.listInbox()
+            if files.isEmpty {
+                status = "inbox 是空的（Agent 還沒丟連結）"
+                return
+            }
+            status = "找到 \(files.count) 筆，開始抓…"
+            var ok = 0
+            var fail = 0
+            for file in files {
+                let job = file.json
+                let url = (job["url"] as? String)
+                    ?? "https://www.youtube.com/watch?v=\(job["video_id"] as? String ?? "")"
+                let channel = (job["channel"] as? String) ?? ""
+                let langs = (job["languages"] as? [String]) ?? settings.languageList
+                appendLog("→ \(file.name)")
+                do {
+                    try await processAndUpload(
+                        urlString: url,
+                        channel: channel,
+                        languages: langs,
+                        deleteInbox: file
+                    )
+                    ok += 1
+                    appendLog("  ✓ 完成")
+                } catch {
+                    fail += 1
+                    appendLog("  ✗ \(error.localizedDescription)")
+                }
+            }
+            status = "同步結束：成功 \(ok)，失敗 \(fail)"
         } catch {
             status = "❌ \(error.localizedDescription)"
         }
+    }
+
+    @MainActor
+    private func runOne(urlText: String, channel: String) async {
+        busy = true
+        defer { busy = false }
+        do {
+            try await processAndUpload(
+                urlString: urlText,
+                channel: channel,
+                languages: settings.languageList,
+                deleteInbox: nil
+            )
+            status = "✅ 已上傳到 GitHub outbox"
+        } catch {
+            status = "❌ \(error.localizedDescription)"
+        }
+    }
+
+    private func processAndUpload(
+        urlString: String,
+        channel: String,
+        languages: [String],
+        deleteInbox: GitHubClient.RemoteFile?
+    ) async throws {
+        let result = try await TranscriptFetcher.fetch(urlString: urlString, languages: languages)
+        var meta: [String: String] = ["client": "ios-yt-captions"]
+        if !channel.isEmpty { meta["channel"] = channel }
+
+        let payload: [String: Any] = [
+            "video_id": result.videoID,
+            "url": urlString.hasPrefix("http")
+                ? urlString
+                : "https://www.youtube.com/watch?v=\(result.videoID)",
+            "title": result.title,
+            "language": result.language,
+            "is_generated": result.isGenerated,
+            "source": result.source,
+            "text": result.text,
+            "segments": [],
+            "meta": meta,
+            "fetched_at": Date().timeIntervalSince1970,
+        ]
+
+        try await settings.github.uploadOutbox(videoID: result.videoID, payload: payload)
+
+        // Optional legacy webhook
+        let hook = settings.webhookURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !hook.isEmpty {
+            try? await WebhookClient.post(
+                webhookURL: hook,
+                token: settings.webhookToken,
+                result: result,
+                originalURL: urlString
+            )
+        }
+
+        if let deleteInbox {
+            try await settings.github.deleteInbox(name: deleteInbox.name, sha: deleteInbox.sha)
+        }
+    }
+
+    @MainActor
+    private func appendLog(_ line: String) {
+        log += (log.isEmpty ? "" : "\n") + line
     }
 }
 
@@ -112,22 +196,29 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("VPS Webhook（建議 Tailscale）") {
-                    TextField("http://100.x.x.x:8791/hooks/transcript", text: $settings.webhookURL)
+                Section("GitHub 信箱（推薦）") {
+                    TextField("Owner", text: $settings.ghOwner)
                         .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                    SecureField("Token（MAC_WEBHOOK_TOKEN）", text: $settings.webhookToken)
-                }
-                Section("語言偏好（逗號分隔）") {
-                    TextField("de,en", text: $settings.languages)
+                    TextField("Repo", text: $settings.ghRepo)
                         .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                    TextField("Branch", text: $settings.ghBranch)
+                        .textInputAutocapitalization(.never)
+                    SecureField("Personal Access Token", text: $settings.ghToken)
                 }
                 Section {
-                    Text("VPS 需開著 mac_transcript_receiver.py。手機與 VPS 在同一 Tailscale 網路。")
+                    Text("Token 權限：Contents Read/Write。在 GitHub → Settings → Developer settings → Fine-grained token。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+                Section("語言偏好") {
+                    TextField("de,en", text: $settings.languages)
+                        .textInputAutocapitalization(.never)
+                }
+                Section("可選：直接 Webhook（Tailscale）") {
+                    TextField("http://100.x:8791/hooks/transcript", text: $settings.webhookURL)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                    SecureField("Token", text: $settings.webhookToken)
                 }
             }
             .navigationTitle("設定")

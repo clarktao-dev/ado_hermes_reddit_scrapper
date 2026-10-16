@@ -431,11 +431,16 @@ def fetch_transcript(video: VideoMeta, timeout: int = 30,
     except Exception:  # noqa: BLE001 — cache read is best-effort
         pass
 
-    # 2. Mac-only mode: enqueue + empty (no kome, no YouTube).
+    # 2. Mac/iPhone bridge mode: enqueue to GitHub inbox (and/or Mac) + empty.
     if mode == "mac":
-        mac_transcript.maybe_enqueue_on_cache_miss(video.id, video.url)
+        mac_transcript.maybe_enqueue_on_cache_miss(
+            video.id, video.url,
+            channel=video.channel_name or "",
+            title=video.title or "",
+        )
         logger.info(
-            "mac mode: no cached transcript for %s — skipping (await Mac fetch)",
+            "mac mode: no cached transcript for %s — skipping "
+            "(await iPhone/Mac fetch via transcript-bridge)",
             video.id,
         )
         return TranscriptResult(

@@ -1,12 +1,17 @@
 import Foundation
 import SwiftUI
 
-/// Persists webhook target + language prefs in UserDefaults.
 final class SettingsStore: ObservableObject {
-    @AppStorage("webhookURL") var webhookURL: String =
-        "http://100.x.x.x:8791/hooks/transcript"
+    // GitHub mailbox (preferred)
+    @AppStorage("ghOwner") var ghOwner: String = "clarktao-dev"
+    @AppStorage("ghRepo") var ghRepo: String = "ado_hermes_reddit_scrapper"
+    @AppStorage("ghBranch") var ghBranch: String = "cursor/mac-transcript-bridge-7a35"
+    @AppStorage("ghToken") var ghToken: String = ""
+
+    // Optional direct webhook (legacy Tailscale path)
+    @AppStorage("webhookURL") var webhookURL: String = ""
     @AppStorage("webhookToken") var webhookToken: String = ""
-    /// Comma-separated language codes, preferred order.
+
     @AppStorage("languages") var languages: String = "de,en"
 
     var languageList: [String] {
@@ -14,5 +19,9 @@ final class SettingsStore: ObservableObject {
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    var github: GitHubClient {
+        GitHubClient(token: ghToken, owner: ghOwner, repo: ghRepo, branch: ghBranch)
     }
 }

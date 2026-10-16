@@ -1,19 +1,23 @@
 # 怎麼用（最短版）
 
-## 你已經上傳了什麼
+## 推薦架構：GitHub 信箱 + iPhone App
 
-`youtube-mac-worker/` 已在 GitHub（commit `e144f5a`）。  
-VPS 接收端也在 PR：`cursor/mac-transcript-bridge-7a35`。
+不必一直開 Mac 終端／Tailscale：
+
+1. Agent 把連結寫進 `transcript-bridge/inbox/` 並 push  
+2. 你打開 iPhone App →「同步佇列」  
+3. App 抓字幕，上傳 `transcript-bridge/outbox/`  
+4. VPS `transcript_bridge_import.py` 匯入 cache → AI 整理  
+
+詳見 `transcript-bridge/README.md`、`ios-yt-captions/README.md`。
 
 ## 誰選片？誰抓字幕？
 
 | 角色 | 做什麼 |
 |------|--------|
-| **VPS cron** `youtube_daily` | 決定今天抓哪幾支（頻道 round-robin） |
-| **Mac worker** | 只負責「這支 URL → 現成字幕」 |
-| **VPS receiver** | 收字幕文字 → 存 cache → AI 整理 |
-
-日常你**不用**在 Mac 上手動貼連結；測試時可以。
+| **VPS cron** `youtube_daily` | 決定今天抓哪幾支；缺字幕 → 寫 GitHub inbox |
+| **iPhone App**（推薦）或 Mac worker | 撈 inbox → 抓現成字幕 → 上傳 outbox |
+| **VPS import** | outbox → transcript cache → AI 整理 |
 
 ---
 

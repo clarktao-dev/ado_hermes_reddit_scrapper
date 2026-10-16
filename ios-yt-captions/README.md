@@ -1,70 +1,64 @@
-# iPhone 字幕小工具（取代 Mac 終端機）
+# iPhone 字幕 App（經 GitHub 信箱）
 
-在 **iPhone** 上：貼上／分享 YouTube 連結 → 用手機網路抓**現成字幕** → 推到 VPS webhook。  
-VPS 仍然**只做 AI 整理**，不抓 YouTube。
+你要的流程：
 
-> 我（雲端 Cursor）無法直接把 App 裝進你的 iPhone。  
-> 你需要用 Mac 的 **Xcode** 裝一次（免費 Apple ID 即可，約 10 分鐘）。
+1. **Agent / VPS** 把要抓的 YouTube 連結寫進 GitHub：`transcript-bridge/inbox/`
+2. **你打開 iPhone App** → 按「同步佇列」
+3. App 自己撈連結、用手機網路抓現成字幕、上傳到 `transcript-bridge/outbox/`
+4. **VPS** 跑 import，把 outbox 存進 transcript cache，再做 AI 整理
 
-## 和 Mac worker 比
+**不必**一直開 Mac 終端，也**不必**為日常同步開 Tailscale（仍可用，但非必須）。
 
-| | Mac worker | 這個 iPhone App |
-|--|--|--|
-| 抓字幕 IP | 家用寬頻 | 手機 4G/5G／家用 Wi‑Fi |
-| 操作 | 兩個終端 + Tailscale | 打開 App 貼網址按一下 |
-| 背景自動 | launchd 常駐 | iOS 限制多，適合「手動／分享」 |
-| 安裝 | Python / brew | Xcode 裝到手機一次 |
+## 一次安裝 App（Mac Xcode → iPhone）
 
-若你幾乎都是「看到片再整理」，iPhone 會輕鬆很多。  
-若要 **完全無人值守每天自動**，仍建議之後再把 Mac worker 當後備。
+1. 安裝 Xcode，新建 iOS App（SwiftUI），名稱 `YTCaptions`
+2. 把本目錄 `YTCaptions/*.swift` 拖進專案
+3. Info：允許 Arbitrary Loads（若還要用 http webhook；純 GitHub HTTPS 可不用）
+4. 選你的 iPhone → Signing 選 Apple ID → ▶ Run
 
-## 一次安裝（Mac 上的 Xcode）
+## App 設定
 
-1. Mac 安裝 [Xcode](https://apps.apple.com/app/xcode/id497799835)（App Store，免費）
-2. 打開 Xcode → **File → New → Project → iOS → App**
-   - Product Name: `YTCaptions`
-   - Interface: **SwiftUI**
-   - Language: **Swift**
-   - 不要勾 Core Data
-3. 把本目錄 `YTCaptions/` 裡的 `.swift` 檔案拖進專案（勾 Copy items）
-4. 刪掉 Xcode 自動產生、重複的 `ContentView.swift` / `*App.swift`（留我們這份）
-5. **Target → Info** 加上（見 `Info-additions.plist`）：
-   - `App Transport Security Settings` → `Allow Arbitrary Loads` = YES  
-     （否則 `http://100.x` Tailscale 會被擋）
-   - `Privacy - Local Network Usage Description` =「需要經 Tailscale 把字幕傳送到 VPS」
-6. 上方裝置選你的 **iPhone**（用線連；開啟開發者模式）
-7. Signing：Team 選你的 Apple ID（Personal Team）
-8. 按 ▶ Run
+| 欄位 | 值 |
+|------|-----|
+| Owner | `clarktao-dev` |
+| Repo | `ado_hermes_reddit_scrapper` |
+| Branch | 先用 `cursor/mac-transcript-bridge-7a35`（merge 後改 `main`） |
+| Token | GitHub Fine-grained PAT，權限 **Contents: Read and write** |
+| 語言 | `de,en` |
 
-第一次可能要在 iPhone：**設定 → 一般 → VPN 與裝置管理** 信任開發者。
+建立 Token：GitHub → Settings → Developer settings → Personal access tokens → Fine-grained  
+只勾這個 repo 的 Contents 讀寫即可。
 
-## App 裡要填的設定
+## Agent 怎麼丟連結
 
-| 欄位 | 例 |
-|--|--|
-| Webhook URL | `http://100.x.x.x:8791/hooks/transcript`（VPS 的 Tailscale IP） |
-| Token | 與 VPS `MAC_WEBHOOK_TOKEN` 相同 |
-| 語言偏好 | `de,en`（德國 Podcast） |
-
-VPS 記得仍要開著：
 ```bash
-cd /root/projects/ado_hermes_reddit_scrapper
-git checkout cursor/mac-transcript-bridge-7a35
-set -a && source /root/.hermes/.env && set +a
-PYTHONPATH=. /root/.hermes/hermes-agent/venv/bin/python \
-  pipeline/scripts/mac_transcript_receiver.py --port 8791
+# 在 VPS / 本機 repo
+PYTHONPATH=. python3 pipeline/scripts/transcript_bridge_enqueue.py \
+  --url 'https://www.youtube.com/watch?v=VIDEO_ID' \
+  --channel Finanztip \
+  --push
 ```
 
-## 日常怎麼用
+或設 `YOUTUBE_TRANSCRIPT_SOURCE=mac` + `TRANSCRIPT_BRIDGE_PUSH=1`，  
+`youtube_daily` 缺字幕時會自動寫 inbox 並 push。
 
-1. 複製 YouTube 連結  
-2. 打開 **YTCaptions** → 貼上 → **抓取並傳送**  
-3. 看到「已送到 VPS」即可；之後 `youtube_daily` 會吃 cache 做整理  
+## VPS 怎麼收結果
 
-（可選）之後可再加「分享到 App」的 Share Extension；第一版先用貼上就好。
+```bash
+git pull
+PYTHONPATH=. python3 pipeline/scripts/transcript_bridge_import.py --push
+```
 
-## 明確做不到的事
+建議加一條 cron：每小時 `git pull && transcript_bridge_import.py --push`。
 
-- 不能在雲端替你按「安裝到 iPhone」
-- 不能做 App Store 上架（除非你要付費開發者帳號 + 審核）
-- 影片**沒有字幕**時不會用 Whisper 硬轉（跟 Mac worker 相同原則）
+## 日常你只要
+
+1. （可選）等 Agent 自動丟 inbox，或自己 enqueue  
+2. 打開 iPhone App → **同步佇列**  
+3. 完成
+
+## 限制（誠實說）
+
+- iOS **不能可靠 24h 背景自動跑**；需要你偶爾打開 App 按同步（或之後再加通知提醒）
+- 影片沒有字幕就抓不到（不會用 Whisper）
+- 雲端 Cursor **無法替你按 Xcode 安裝**；要在 Mac 裝一次到手機

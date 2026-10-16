@@ -174,20 +174,41 @@ def enqueue_on_mac(url_or_id: str, *, timeout: float = 15.0) -> dict:
         raise RuntimeError(f"Mac enqueue failed: {e}") from e
 
 
-def maybe_enqueue_on_cache_miss(video_id: str, video_url: str) -> Optional[dict]:
-    """Best-effort enqueue when running in ``mac`` mode and cache is empty."""
+def maybe_enqueue_on_cache_miss(
+    video_id: str,
+    video_url: str,
+    *,
+    channel: str = "",
+    title: str = "",
+) -> Optional[dict]:
+    """On cache miss in ``mac`` mode: prefer GitHub inbox, else Tailscale Mac worker.
+
+    1. ``transcript-bridge/inbox/<id>.json`` (iPhone App polls GitHub) — default
+    2. Optional ``MAC_WORKER_URL`` HTTP enqueue (legacy Mac terminal worker)
+    """
     if transcript_source_mode() != "mac":
         return None
-    if not mac_worker_base_url():
-        logger.info(
-            "cache miss for %s and %s unset — skip enqueue",
-            video_id, MAC_WORKER_URL_ENV,
-        )
-        return None
+
+    out: dict = {"video_id": video_id}
     try:
-        result = enqueue_on_mac(video_url or video_id)
-        logger.info("enqueued %s on Mac worker: %s", video_id, result)
-        return result
+        from pipeline.lib import transcript_bridge
+        gh = transcript_bridge.maybe_enqueue_github_on_cache_miss(
+            video_id, video_url, channel=channel, title=title,
+        )
+        if gh is not None:
+            out["github_inbox"] = gh
+            logger.info("enqueued %s on GitHub transcript-bridge inbox", video_id)
     except Exception as e:  # noqa: BLE001
-        logger.warning("enqueue on Mac failed for %s: %s", video_id, e)
-        return {"ok": False, "error": str(e)}
+        logger.warning("github inbox enqueue failed for %s: %s", video_id, e)
+        out["github_inbox"] = {"ok": False, "error": str(e)}
+
+    if mac_worker_base_url():
+        try:
+            result = enqueue_on_mac(video_url or video_id)
+            out["mac_worker"] = result
+            logger.info("enqueued %s on Mac worker: %s", video_id, result)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("enqueue on Mac failed for %s: %s", video_id, e)
+            out["mac_worker"] = {"ok": False, "error": str(e)}
+
+    return out
