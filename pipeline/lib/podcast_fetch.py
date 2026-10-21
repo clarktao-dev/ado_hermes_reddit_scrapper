@@ -41,6 +41,7 @@ Skipped for now (documented as future work):
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -128,6 +129,19 @@ def _parse_duration_to_seconds(raw: str) -> int:
     return h * 3600 + m * 60 + s
 
 
+def _clean_feed_text(raw: str) -> str:
+    """Strip CDATA/HTML from an RSS text node and collapse whitespace.
+
+    Also unescapes the HTML entities Podigee/Haufe embed in ``<description>``
+    (e.g. ``&amp;``, ``&quot;``) so the text reads as prose, not markup.
+    """
+    if not raw:
+        return ""
+    cleaned = re.sub(r"<[^>]+>", " ", raw)
+    cleaned = html.unescape(cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _extract_episode(item: ET.Element, channel_name: str, rss_url: str) -> Optional[PodcastEpisode]:
     """Parse one <item> into a PodcastEpisode."""
     def text(tag: str) -> str:
@@ -162,9 +176,19 @@ def _extract_episode(item: ET.Element, channel_name: str, rss_url: str) -> Optio
         if tx_url and tx_type == "application/json":
             break
 
-    # Strip HTML tags from description (RSS feeds commonly use CDATA-wrapped HTML)
-    desc = re.sub(r"<[^>]+>", " ", text("description"))
-    desc = re.sub(r"\s+", " ", desc).strip()
+    # Description floor: <description> is often only a 1-2 sentence teaser,
+    # while <content:encoded> carries the full shownotes (guest bio, key
+    # stats). Prefer the longer of the two so short-teaser episodes still
+    # clear the downstream length floor instead of looping in pending review
+    # forever (limmo ep 334 was stuck 23 consecutive days, 2026-10-21).
+    desc = _clean_feed_text(text("description"))
+    encoded = ""
+    for child in item:
+        if child.tag.endswith("encoded"):
+            encoded = _clean_feed_text(child.text or "")
+            break
+    if len(encoded) > len(desc):
+        desc = encoded
 
     return PodcastEpisode(
         id=guid,
@@ -173,7 +197,12 @@ def _extract_episode(item: ET.Element, channel_name: str, rss_url: str) -> Optio
         published=pub or datetime.now(timezone.utc),
         duration=duration,
         audio_url=audio_url,
-        description=desc[:500],  # cap to keep vault frontmatter reasonable
+        # Cap shownotes so a pathological feed can't blow up the vault, but
+        # keep this comfortably ABOVE the 500-char downstream floor in
+        # youtube_daily — a 500-char cap == the floor, which meant
+        # description-only episodes produced a teaser with the actual key
+        # stats (JLL 92%/5%, guest bios) truncated away.
+        description=desc[:4000],
         transcript_url=tx_url,
         transcript_type=tx_type,
         rss_url=rss_url,
