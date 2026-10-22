@@ -20,6 +20,7 @@ CLI：
 import os
 import sys
 import json
+import time
 import argparse
 import requests
 from pathlib import Path
@@ -29,6 +30,63 @@ from typing import Optional, List
 # Discord API 字數限制
 DISCORD_MAX_CHARS = 2000
 SEGMENT_SAFE = 1900  # 留 buffer
+
+# ── Discord 429 rate-limit retry (2026-10-21) ────────────────────────────
+# 為什麼需要：news_daily 2026-10-20 一次送 15 個 embed 觸發 per-channel
+# 429（5 msg / 5s），6/14 items 靜默掉在這裡 —— send_to_channel 原本
+# 只回 {"ok": False, "error": "http 429: ..."}，pipeline 就把它當成
+# 「已送出但沒回 id」繼續走，Airtable 記 discord=False，讀者永遠收不到。
+# 規則：讀 Discord 回的 retry_after（秒，通常 0.3–0.6）+ 0.15s jitter，
+# 最多試 4 次；非 429 的 4xx/5xx 不重試（重試沒意義，只會延長）。
+MAX_429_RETRIES = 4
+_429_BASE_SLEEP = 0.15
+
+
+def _retry_after_seconds(resp, attempt: int) -> float:
+    """從 Discord 429 body 的 retry_after 決定這次要睡多久。
+
+    拿不到就 exponential fallback（0.4 * 2**attempt），並額外加 jitter
+    避免多個 sender 同時醒來再撞一次。
+    """
+    delay = 0.4 * (2 ** attempt)
+    try:
+        body = resp.json()
+        if isinstance(body, dict) and "retry_after" in body:
+            delay = float(body["retry_after"])
+    except Exception:  # noqa: BLE001 — body 不是 JSON 時走 fallback
+        pass
+    if body_is_global(resp):
+        delay = max(delay, 1.0)
+    return delay + _429_BASE_SLEEP
+
+
+def body_is_global(resp) -> bool:
+    """Discord 的 global rate limit 會讓 retry_after 長很多。"""
+    try:
+        body = resp.json()
+        return bool(isinstance(body, dict) and body.get("global"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _post_with_429_retry(url: str, headers: dict, payload: dict) -> requests.Response:
+    """POST 並在遇到 429 時依 retry_after 重試。回傳最後一次 response。
+
+    這層放在 transport，所以所有 caller（news_daily / youtube / podcast）
+    都自動獲得 rate-limit 保護，不只是 news pipeline。
+    """
+    resp: Optional[requests.Response] = None
+    for attempt in range(MAX_429_RETRIES + 1):
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        if resp.status_code != 429:
+            return resp
+        if attempt >= MAX_429_RETRIES:
+            break
+        sleep_s = _retry_after_seconds(resp, attempt)
+        print(f"[discord_sender] 429 rate limited, sleeping {sleep_s:.2f}s "
+              f"(retry {attempt + 1}/{MAX_429_RETRIES})", file=sys.stderr, flush=True)
+        time.sleep(sleep_s)
+    return resp  # type: ignore[return-value]
 
 
 def _load_token() -> str:
@@ -135,7 +193,7 @@ def send_to_channel(
                     "color": color,
                 }]
             }
-            r = requests.post(url, headers=headers, json=payload, timeout=15)
+            r = _post_with_429_retry(url, headers, payload)
             if r.status_code == 200:
                 message_ids.append(r.json()["id"])
             else:
@@ -143,7 +201,7 @@ def send_to_channel(
         else:
             # 純文字模式：自動分段
             for segment in _split_message(text):
-                r = requests.post(url, headers=headers, json={"content": segment}, timeout=15)
+                r = _post_with_429_retry(url, headers, {"content": segment})
                 if r.status_code == 200:
                     message_ids.append(r.json()["id"])
                 else:
