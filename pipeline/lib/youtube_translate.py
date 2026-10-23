@@ -54,7 +54,27 @@ _GT_SOFT_FAIL_PREFIXES = (
 
 # ollama model used as fallback translator when Google refuses. Matches the
 # model we picked in reddit-safe commit f37d57f (hang-resistant on ollama-cloud).
-_LLM_FALLBACK_MODEL = os.environ.get("YT_LLM_FALLBACK_MODEL", "gpt-oss:120b")
+#
+# 2026-10-23: Google Translate is now IP-blocked from this VPS entirely (even a
+# 10-char "Hallo Welt" returns 429 TooManyRequests), so *every* chunk routes
+# through this fallback. Benchmarked on a real 4500-char German chunk
+# (podcast e04a912aeaabd):
+#   gpt-oss:120b    179.9s  (reasoning model, ~8k reasoning tokens)
+#   gpt-oss:20b     105.2s
+#   glm-5.3-flash   109.5s
+#   minimax-m3.1-flash 70.8s
+#   gemma4:31b       17.1s  <- 10x faster, best zh-TW fidelity
+#   nemotron-3-nano:30b 14.5s  <- fastest, adequate fidelity
+# At 7 chunks x ~180s the old gpt-oss:120b default blew the per-call timeout and
+# killed the whole channel. Default to gemma4:31b: non-reasoning, no CoT token
+# burn, 17s/chunk, and it produces the most natural zh-TW of the fast options.
+_LLM_FALLBACK_MODEL = os.environ.get("YT_LLM_FALLBACK_MODEL", "gemma4:31b")
+
+# Per-call timeout for the LLM fallback. Reasoning models (gpt-oss:*, glm-5.x)
+# need 200-300s; non-reasoning models (gemma4, nemotron-3-nano) finish in ~20s.
+# 300s keeps the documented N+7 sequential-hang pattern from killing the run
+# while still leaving room for a slow reasoning-model fallback.
+_LLM_FALLBACK_TIMEOUT = int(os.environ.get("YT_LLM_FALLBACK_TIMEOUT", "300"))
 
 
 @dataclass
@@ -114,13 +134,21 @@ def _is_soft_fail(text: str) -> bool:
 
 
 def _translate_chunk_via_ollama(chunk: str, source: str, target: str,
-                                timeout: int = 60) -> str:
-    """Last-resort translation via ollama LLM (gpt-oss:120b default)."""
+                                timeout: Optional[int] = None) -> str:
+    """Last-resort translation via ollama LLM (gemma4:31b default).
+
+    ``timeout`` defaults to ``_LLM_FALLBACK_TIMEOUT`` (300s) instead of the
+    historical 60s: with Google Translate blocked, this is the ONLY path, and
+    a reasoning model on a 4500-char chunk needs >60s. Callers can still pass
+    an explicit timeout to override.
+    """
     if call is None:
         raise RuntimeError(
             "ollama LLM client (reddit_safe.pipeline.llm_client.call) "
             "unavailable; cannot fall back from Google Translate"
         )
+    if timeout is None:
+        timeout = _LLM_FALLBACK_TIMEOUT
     lang_name = {"de": "German", "en": "English", "auto": "auto-detect"}.get(
         source, source)
     target_name = {"zh-TW": "Traditional Chinese (Taiwan)",
@@ -136,7 +164,7 @@ def _translate_chunk_via_ollama(chunk: str, source: str, target: str,
         {"role": "system", "content": sys_prompt},
         {"role": "user", "content": user_prompt},
     ]
-    text, _usage = call(messages, timeout=timeout)
+    text, _usage = call(messages, model=_LLM_FALLBACK_MODEL, timeout=timeout)
     text = (text or "").strip()
     if not text or _is_soft_fail(text):
         raise RuntimeError(
