@@ -116,6 +116,97 @@ def normalize_url(url: str) -> str:
     return parse.urlunparse((scheme, netloc, parsed.path, parsed.params, new_query, ""))
 
 
+# --------------------------------------------------------------------------- #
+# Canonical content id (slug-rotation-proof dedup)
+# --------------------------------------------------------------------------- #
+#
+# Several publishers rotate the *slug* of an article while keeping the article
+# id stable. Handelsblatt is the worst offender in this pipeline: the same
+# article appears as
+#     .../immobilien-hier-steigen-die-mieten-in-deutschland-am-staerksten-01/100266848.html
+#     .../immobilien-warum-die-mieten-steigen-und-die-kaufpreise-stagnieren/100266848.html
+# on consecutive days. Exact-URL dedup therefore re-publishes the same article
+# under a fresh URL. Measured on 2026-11-13: 33 canonical ids were stored
+# under more than one distinct URL, covering 123 ledger rows.
+#
+# ``canonical_content_id`` extracts the publisher's own stable id so the dedup
+# gate can compare content identity instead of URL string identity. It returns
+# ``None`` for hosts with no stable id — those keep exact-URL behaviour.
+
+_CANONICAL_ID_PATTERNS: List[tuple[str, "re.Pattern[str]"]] = [
+    # handelsblatt.com/finanzen/immobilien/<slug>/<digits>.html
+    ("hbl", re.compile(r"/(\d{6,})\.html?$", re.I)),
+    # n-tv.de/wirtschaft/<slug>-id<digits>.html
+    ("ntv", re.compile(r"-id(\d{5,})\.html?$", re.I)),
+    # spiegel.de/<section>/<slug>-<uuid>.html  (the ".html" suffix is optional
+    # on spiegel.de — many article URLs carry no extension at all)
+    ("spiegel", re.compile(
+        r"-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+        r"(?:\.html?)?$",
+        re.I,
+    )),
+]
+
+# Hosts that carry a stable per-article token in the path.
+_CANONICAL_HOST_PATTERNS: List[tuple[str, "re.Pattern[str]"]] = [
+    # news.google.com/rss/articles/<token>
+    ("gnews", re.compile(r"/rss/articles/([A-Za-z0-9_\-]{20,})", re.I)),
+]
+
+_CANONICAL_HOST_SUFFIXES = (
+    "handelsblatt.com",
+    "n-tv.de",
+    "spiegel.de",
+    "news.google.com",
+)
+
+
+def canonical_content_id(url: str) -> Optional[str]:
+    """Return a slug-rotation-proof content id for ``url``.
+
+    Returns ``None`` when the host has no known stable id — callers must then
+    fall back to exact-URL comparison.
+
+    The returned id is namespaced by host (``"hbl:100266848"``) so an id from
+    one publisher can never collide with another's.
+    """
+    from urllib import parse
+
+    if not url:
+        return None
+    parsed = parse.urlparse(url.strip())
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    path = parsed.path or ""
+
+    for suffix in _CANONICAL_HOST_SUFFIXES:
+        if host == suffix or host.endswith("." + suffix):
+            break
+    else:
+        return None
+
+    for prefix, pattern in _CANONICAL_ID_PATTERNS:
+        if prefix == "hbl" and not host.endswith("handelsblatt.com"):
+            continue
+        if prefix == "ntv" and not host.endswith("n-tv.de"):
+            continue
+        if prefix == "spiegel" and not host.endswith("spiegel.de"):
+            continue
+        m = pattern.search(path)
+        if m:
+            return f"{prefix}:{m.group(1).lower()}"
+
+    for prefix, pattern in _CANONICAL_HOST_PATTERNS:
+        if prefix == "gnews" and not host.endswith("news.google.com"):
+            continue
+        m = pattern.search(path)
+        if m:
+            return f"{prefix}:{m.group(1)}"
+
+    return None
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -157,6 +248,151 @@ def _extract_quoted(formula: str, field: str) -> Optional[str]:
     return match.group(1).replace("\\'", "'")
 
 
+# --- Composite formula grammar -------------------------------------------
+# The Firestore ledger evaluates Airtable filter formulas client-side
+# (under Airtable they ran server-side). These patterns cover the
+# composite shapes this codebase builds, e.g.
+#   AND({source_type}='youtube',
+#       IS_AFTER({first_seen_at}, '2026-10-31T04:01:42.000Z'),
+#       NOT(OR({article_type}='long-form', {article_type}='pending-long-form')))
+# A composite formula that was not understood used to fall through to
+# "unhandled → include record", which silently returned the ENTIRE
+# ledger (1909 records instead of the 3-day window).
+
+_FIELD_EQ_RE = re.compile(r"^\{([A-Za-z_][A-Za-z0-9_]*)\}='((?:[^'\\]|\\.)*)'$")
+_IS_AFTER_RE = re.compile(
+    r"^IS_AFTER\(\{([A-Za-z_][A-Za-z0-9_]*)\},\s*'([^']+)'\)$"
+)
+_DATEDIFF_RE = re.compile(
+    r"^DATETIME_DIFF\(NOW\(\),\s*\{([A-Za-z_][A-Za-z0-9_]*)\},\s*'days'\)\s*<=\s*(\d+)$"
+)
+
+
+def _split_formula_args(inner: str) -> List[str]:
+    """Split a comma-separated argument list on top-level commas only.
+
+    Nested parentheses and quoted string literals (including the
+    backslash-escaped and doubled forms) are respected.
+    """
+    parts: List[str] = []
+    buf: List[str] = []
+    depth = 0
+    in_quote = False
+    i = 0
+    n = len(inner)
+    while i < n:
+        ch = inner[i]
+        if in_quote:
+            buf.append(ch)
+            if ch == "\\" and i + 1 < n:
+                buf.append(inner[i + 1])
+                i += 2
+                continue
+            if ch == "'":
+                # '' inside a literal is an escaped quote — stay in string.
+                if i + 1 < n and inner[i + 1] == "'":
+                    buf.append(inner[i + 1])
+                    i += 2
+                    continue
+                in_quote = False
+            i += 1
+            continue
+        if ch == "'":
+            in_quote = True
+            buf.append(ch)
+        elif ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth -= 1
+            buf.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _eval_formula_expr(
+    fields: Dict[str, Any], expr: str, now: datetime
+) -> Optional[bool]:
+    """Evaluate one formula expression against ``fields``.
+
+    Returns True/False for a supported expression, or None when the
+    expression shape is not understood (the caller then falls back to
+    the legacy "include record" behaviour).
+    """
+    expr = expr.strip()
+    if not expr:
+        return None
+
+    upper = expr.upper()
+
+    if upper.startswith("AND(") and expr.endswith(")"):
+        args = _split_formula_args(expr[4:-1])
+        if not args:
+            return None
+        for arg in args:
+            result = _eval_formula_expr(fields, arg, now)
+            if result is None:
+                return None
+            if not result:
+                return False
+        return True
+
+    if upper.startswith("OR(") and expr.endswith(")"):
+        args = _split_formula_args(expr[3:-1])
+        if not args:
+            return None
+        matched = False
+        for arg in args:
+            result = _eval_formula_expr(fields, arg, now)
+            if result is None:
+                return None
+            if result:
+                matched = True
+        return matched
+
+    if upper.startswith("NOT(") and expr.endswith(")"):
+        args = _split_formula_args(expr[4:-1])
+        if len(args) != 1:
+            return None
+        result = _eval_formula_expr(fields, args[0], now)
+        if result is None:
+            return None
+        return not result
+
+    match = _FIELD_EQ_RE.match(expr)
+    if match:
+        field, value = match.group(1), match.group(2).replace("\\'", "'")
+        return fields.get(field) == value
+
+    match = _IS_AFTER_RE.match(expr)
+    if match:
+        field, cutoff_raw = match.group(1), match.group(2)
+        cutoff = _parse_iso(cutoff_raw)
+        value = _parse_iso(fields.get(field))
+        if cutoff is None or value is None:
+            # An absent/unparseable date cannot satisfy IS_AFTER.
+            return False
+        return value > cutoff
+
+    match = _DATEDIFF_RE.match(expr)
+    if match:
+        field, max_days = match.group(1), int(match.group(2))
+        value = _parse_iso(fields.get(field))
+        if value is None:
+            return False
+        return _days_between(now, value) <= max_days
+
+    return None
+
+
 def _matches_filter_formula(fields: Dict[str, Any], formula: Optional[str]) -> bool:
     """Evaluate the small subset of Airtable formulas this codebase uses."""
     if not formula:
@@ -171,6 +407,17 @@ def _matches_filter_formula(fields: Dict[str, Any], formula: Optional[str]) -> b
     pipeline_run_id = _extract_quoted(formula, "pipeline_run_id")
     if pipeline_run_id is not None and "{pipeline_run_id}" in formula:
         return fields.get("pipeline_run_id") == pipeline_run_id
+
+    # Composite formulas must be evaluated as a whole: the single-field
+    # fast paths below would mis-read e.g. NOT(OR({article_type}='x'))
+    # as a plain {article_type}='x' equality test, and the legacy
+    # DATETIME_DIFF regex only matches {processed_at} (not {first_seen_at}).
+    # If the composite shape is not understood we fall through to the
+    # legacy fast paths below, preserving their behaviour.
+    if "AND(" in formula or "NOT(" in formula or "OR(" in formula:
+        composite = _eval_formula_expr(fields, formula, now)
+        if composite is not None:
+            return composite
 
     article_type = _extract_quoted(formula, "article_type")
     if article_type is not None and "AND(" not in formula:
@@ -250,6 +497,9 @@ class ProcessedStore:
         self.collection_name = collection_name_for_table(table_name)
         self._memory = _memory
         self._seen_cache: Dict[str, Dict[str, Any]] = {}
+        # Lazily built index of ledger rows keyed by canonical content id
+        # (slug-rotation-proof dedup). None = not built yet.
+        self._canonical_index: Optional[Dict[str, Dict[str, Any]]] = None
         logger.info(
             "ProcessedStore initialised: collection=%s (table=%s)",
             self.collection_name,
@@ -369,6 +619,85 @@ class ProcessedStore:
             return False
         self._seen_cache[source_hash] = record
         return True
+
+    def is_processed_canonical(
+        self,
+        source_type: str,
+        url: str,
+        source_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Slug-rotation-proof duplicate check.
+
+        Exact-URL dedup misses articles whose publisher rotates the URL slug
+        while keeping the article id (Handelsblatt does this routinely). This
+        method resolves the URL to a canonical content id and reports the
+        ledger record that already carries it, if any.
+
+        Returns the matching record dict (so callers can log which prior run
+        produced the duplicate) or ``None`` when the content is new.
+
+        The canonical-id index is built once per store instance and cached, so
+        the cost is one collection scan per process, not one per item.
+        """
+        canonical = canonical_content_id(url)
+        if canonical is None:
+            return None
+
+        if self._canonical_index is None:
+            self._canonical_index = self._build_canonical_index(source_type)
+
+        match = self._canonical_index.get(canonical)
+        if match is None:
+            return None
+        # A record for the *exact same* normalized URL is the ordinary
+        # exact-match case — do not report it as a slug-rotation duplicate.
+        if source_id is not None:
+            existing = match.get("source_ids") or set()
+            if source_id in existing:
+                return None
+        return match
+
+    def _build_canonical_index(
+        self, source_type: str
+    ) -> Dict[str, Dict[str, Any]]:
+        """Scan the ledger once and index rows by canonical content id."""
+        index: Dict[str, Dict[str, Any]] = {}
+        try:
+            if self._memory is not None:
+                rows: List[Tuple[str, Dict[str, Any]]] = list(self._memory.items())
+            else:
+                rows = [
+                    (doc.id, doc.to_dict() or {})
+                    for doc in self._retry(lambda: list(self._collection().stream()))
+                ]
+            for _doc_id, data in rows:
+                if data.get("source_type") != source_type:
+                    continue
+                sid = str(data.get("source_id", "") or "")
+                canonical = canonical_content_id(sid)
+                if canonical is None:
+                    continue
+                entry = index.setdefault(
+                    canonical,
+                    {
+                        "canonical_id": canonical,
+                        "source_ids": set(),
+                        "title": data.get("title", ""),
+                        "pipeline_run_id": data.get("pipeline_run_id"),
+                    },
+                )
+                entry["source_ids"].add(sid)
+        except Exception as exc:  # noqa: BLE001
+            # A failed index build must NOT silently allow duplicates through
+            # as if they were new — but it also must not crash the pipeline.
+            # Log loudly and fall back to exact-URL-only dedup.
+            logger.warning(
+                "canonical index build failed (%s: %s); "
+                "falling back to exact-URL dedup only",
+                type(exc).__name__, exc,
+            )
+            index = {}
+        return index
 
     def mark_processed(
         self,

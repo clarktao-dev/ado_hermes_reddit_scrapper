@@ -57,6 +57,7 @@ from pipeline.lib import (  # noqa: E402
 from pipeline.lib.processed_store import (  # noqa: E402
     DEFAULT_TABLE,
     ProcessedStore,
+    canonical_content_id,
     make_hash,
     normalize_url,
 )
@@ -142,6 +143,7 @@ def filter_processed(
         store = _get_store()
     kept: List[dict] = []
     skipped_exact = 0
+    skipped_canonical = 0
     skipped_no_url = 0
 
     # Dedup is now EXACT-URL-ONLY (Task 9, 2026-08-09).
@@ -197,12 +199,34 @@ def filter_processed(
             )
             continue
 
+        # Plan 20 (2026-11-13): slug-rotation dedup. Some publishers rotate
+        # the URL slug of an article while keeping its id stable (Handelsblatt
+        # does this routinely), so exact-URL matching re-publishes the same
+        # article under a fresh URL. Compare the canonical content id too.
+        canonical = canonical_content_id(normalized)
+        if canonical is not None:
+            match = store.is_processed_canonical(
+                "news", normalized, source_id=normalized,
+            )
+            if match is not None:
+                skipped_canonical += 1
+                logger.info(
+                    "[skip slug-rotated-dup] canonical=%s | %s | "
+                    "first seen in run %s",
+                    canonical,
+                    item.get("title", "")[:60],
+                    match.get("pipeline_run_id"),
+                )
+                continue
+
         kept.append(item)
 
     logger.info(
-        "filter_processed: %d kept, %d skipped(exact), %d skipped(no-url) "
-        "[Plan 9: same-batch URL dedup also enforced]",
-        len(kept), skipped_exact, skipped_no_url,
+        "filter_processed: %d kept, %d skipped(exact), %d skipped(slug-rotated), "
+        "%d skipped(no-url) "
+        "[Plan 9: same-batch URL dedup also enforced; "
+        "Plan 20: canonical content-id dedup enforced]",
+        len(kept), skipped_exact, skipped_canonical, skipped_no_url,
     )
     return kept
 
@@ -974,23 +998,51 @@ def step_write_vault(items, cfg, content_kind: str = "longform",
                 p.unlink()
         wiped = True
     item_paths: dict[int, str] = {}
+    written_items: list = []
+    rejected: list = []
     for i, it in enumerate(items):
         # normalize deprecated content_kind values (Plan 1 era). Plan 5 dropped
         # "full-article" — treat it as "longform" so legacy items still write.
         item_kind = it.get("content_kind") or content_kind
         if item_kind == "full-article":
             item_kind = "longform"
-        path = obsidian.write_news_item(it, vault_root, date_str,
-                                        strict_traditional=strict_traditional,
-                                        content_kind=item_kind)
-        item_paths[i] = path
+        # Mode 18 (2026-10-23): a single gate rejection used to abort the
+        # whole loop, which skipped ``_index.md`` entirely and made the
+        # caller fall back to the FULL ranked list — so the items that never
+        # landed in the vault were still pushed to Discord and marked
+        # processed. Fail soft per item instead: reject the offender, keep
+        # the rest, and always write the index.
+        try:
+            path = obsidian.write_news_item(it, vault_root, date_str,
+                                            strict_traditional=strict_traditional,
+                                            content_kind=item_kind)
+        except ValueError as exc:  # noqa: BLE001 — validation gate rejection
+            logger.warning(
+                "vault write rejected item idx=%d source=%s: %s",
+                i, it.get("source_name", "?"), exc,
+            )
+            print(f"  [vault] REJECTED item #{i} "
+                  f"({it.get('source_name', '?')}): {exc}", file=sys.stderr)
+            rejected.append({"index": i, "source": it.get("source_name", "?"),
+                             "title": it.get("title", "")[:80], "error": str(exc)})
+            continue
+        # item_paths is keyed by the index of the WRITTEN list, because
+        # step_mark_processed() looks up output_path by that index.
+        item_paths[len(written_items)] = path
+        written_items.append(it)
     # Index file is shared across all modes in the same daily folder —
-    # only the first call writes it.
-    index_path = obsidian.write_daily_index(items, vault_root, date_str, github_url)
+    # only the first call writes it. It lists ONLY the items that were
+    # actually written, so ``total_items`` matches the files on disk.
+    index_path = obsidian.write_daily_index(written_items, vault_root, date_str,
+                                            github_url)
     kinds_summary = ",".join(sorted(suffixes)) or "?"
     print(f"  wrote {len(item_paths) + 1} files under {vault_root}/Daily/{date_str}/"
           f" (suffixes={kinds_summary}{' wiped existing' if wiped else ''})")
-    return {"items": items, "item_paths": item_paths, "index_path": index_path}
+    if rejected:
+        print(f"  [vault] {len(rejected)} item(s) rejected by the validation "
+              f"gate and skipped (remaining {len(written_items)} written)")
+    return {"items": written_items, "item_paths": item_paths,
+            "index_path": index_path, "rejected": rejected}
 
 
 def step_send_discord(items, cfg, dry_run):
@@ -1442,6 +1494,20 @@ def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
                   lambda: step_translate(items, chunk_size=chunk_size)) or []
 
     # Step 5b: relevance filter (drop low LLM-scored items)
+    # Mode 18 (2026-10-23): also drop items whose translation FAILED.
+    # ``_mark_error()`` leaves ``quick_score`` intact, so such items used to
+    # survive the relevance filter and reach the vault gate with an empty
+    # title_zh — which aborted the vault write and caused over-marking.
+    # A failed translation must never become a vault file, a Discord
+    # message, or a processed-ledger row.
+    if items:
+        before_err = len(items)
+        items = [it for it in items
+                 if not (isinstance(it, dict) and it.get("llm_error"))]
+        if before_err != len(items):
+            print(f"  llm_error filter: {before_err} → {len(items)} items "
+                  f"({before_err - len(items)} translation failure(s) dropped)",
+                  flush=True)
     if min_relevance is not None and min_relevance > 0:
         before = len(items)
         items = filter_by_relevance(items, min_score=min_relevance)
@@ -1482,12 +1548,22 @@ def run_pipeline(dry_run=False, source_limit=None, chunk_size=8,
     # Step 7: write vault
     vault_summary = _step("7. write_vault",
                           lambda: step_write_vault(items, cfg, content_kind=content_kind))
-    vault_items: List[dict] = list(items) if isinstance(items, list) else []
+    vault_items: List[dict] = []
     item_paths: dict = {}
     if isinstance(vault_summary, dict):
-        _vi = vault_summary.get("items", items)
+        _vi = vault_summary.get("items", [])
         vault_items = list(_vi) if isinstance(_vi, list) else []
         item_paths = vault_summary.get("item_paths", {}) or {}
+    else:
+        # Mode 18 (2026-10-23): the old code fell back to the FULL ranked
+        # list here, which pushed unwritten items to Discord and marked
+        # them processed. A vault-write failure must abort the side-effect
+        # steps and make the process exit non-zero — never fake success.
+        print("\n[ERROR] Step 7 (write_vault) failed — aborting before "
+              "Discord push / GitHub push / mark_processed so that no "
+              "unwritten item can be published or marked as processed.",
+              file=sys.stderr)
+        return 1
 
     # Step 8: send discord (capture message_ids per item)
     discord_summary = _step("8. send_discord",
