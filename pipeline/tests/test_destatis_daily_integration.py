@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -299,14 +300,31 @@ class TestFetchAndParseSmoke:
         # Time budget: 5s nominal, hard cap 10s.
         assert elapsed < 10.0, f"fetch took {elapsed:.1f}s, budget is 10s"
 
-        # 198 rows = 1 header + 197 monthly values (1970-01 → 2026-05).
-        # We assert the production contract (the test_destatis_daily_render
-        # contract uses 3-row fixtures; the live dataset is much bigger).
+        # The live dataset grows every time Destatis publishes a new month
+        # (2010-01 → latest), so we must NOT assert a frozen row count —
+        # that assertion went stale the moment upstream published 3 more
+        # months. Instead assert the *shape*: one header row plus a
+        # contiguous monthly series whose length matches the period span.
         assert isinstance(ds, DestatisDataset)
         assert ds.source_id == "auftragseingang_bauhauptgewerbe"
         assert ds.name_zh == "主承攬業新訂單(實質,原值)"
-        assert len(ds.rows) == 198, (
-            f"expected 198 rows (1 header + 197 monthly), got {len(ds.rows)}"
+
+        def _month_index(period: str) -> int:
+            m = re.match(r"^(\d{4})/(\d{2})/(\d{2})$", period.strip())
+            assert m, f"unexpected period format: {period!r}"
+            year, month = int(m.group(1)), int(m.group(2))
+            return year * 12 + (month - 1)
+
+        first_month = _month_index(ds.rows[1][0])
+        last_month = _month_index(ds.rows[-1][0])
+        assert last_month >= first_month, (
+            f"last period {ds.rows[-1][0]!r} precedes first {ds.rows[1][0]!r}"
+        )
+        expected_rows = (last_month - first_month + 1) + 1  # + header
+        assert len(ds.rows) == expected_rows, (
+            f"expected {expected_rows} rows (1 header + "
+            f"{last_month - first_month + 1} contiguous months), "
+            f"got {len(ds.rows)}"
         )
         assert len(ds.header) >= 2
         # First column should be a time-series period column.
@@ -490,16 +508,41 @@ class TestAirtableDedupBlocksRerun:
             destatis_daily, "ProcessedStore", _store_factory,
         )
 
+        # ---- Hermetic fetch stub.
+        # Stage A must NOT hit the live network: production derives the
+        # dedup key from the CSV's last period (``destatis:{id}:{YYYY-MM}``),
+        # so a live fetch yields a period-dependent key that never matches a
+        # hardcoded seed — the ledger would look "empty" and the sources
+        # would be re-processed. The stub returns a deterministic dataset
+        # with reference_period="2026-02" (what production derives from a
+        # series ending at 2026/02/01), so the seeded keys below exercise
+        # the real period-aware dedup contract.
+        def _fake_fetch(source_config):
+            return make_fixture_dataset(
+                source_id=source_config["id"],
+                header=["Monat", "Wert"],
+                rows=[["2026/01/01", "1"], ["2026/02/01", "2"]],
+                name_zh=source_config.get("name_zh", source_config["id"]),
+                name_de=source_config.get("name_de", source_config["id"]),
+                url=source_config["url"],
+                reference_period="2026-02",
+            )
+
+        monkeypatch.setattr(
+            destatis_daily, "fetch_and_parse", _fake_fetch,
+        )
+
         # Stage 3 destatis records (the same shape T3.2 wrote in
         # production). After this loop, is_processed must return True
-        # for every (destatis_csv, destatis:<id>:latest) tuple.
+        # for every (destatis_csv, destatis:<id>:2026-02) tuple.
         seed_ids = [
             "auftragseingang_bauhauptgewerbe",
             "genehmigte_wohnungen_monat",
             "investments_construction",
         ]
+        seed_period = "2026-02"
         for sid in seed_ids:
-            dedup_id = f"destatis:{sid}:latest"
+            dedup_id = f"destatis:{sid}:{seed_period}"
             store.mark_processed(
                 source_type="destatis_csv",
                 source_id=dedup_id,
@@ -507,7 +550,7 @@ class TestAirtableDedupBlocksRerun:
                 channels=[f"destatis.{sid}"],
                 pipeline_run_id="test-dedup-run",
                 output_path=f"immobilien-kb/vault/Stat/2026-08-13/{sid}.md",
-                metadata={"n_data_rows": 10, "n_cols": 2, "reference_period": "latest"},
+                metadata={"n_data_rows": 10, "n_cols": 2, "reference_period": seed_period},
                 tags=["destatis", "test"],
                 article_type="stat-table",
             )
@@ -515,7 +558,7 @@ class TestAirtableDedupBlocksRerun:
         # Confirm the ledger has the 3 records.
         for sid in seed_ids:
             assert store.is_processed(
-                "destatis_csv", f"destatis:{sid}:latest"
+                "destatis_csv", f"destatis:{sid}:{seed_period}"
             ) is True, f"is_processed should be True for {sid}"
 
         # ---- A: run_pipeline with --skip-store=False but ledger full
@@ -540,21 +583,8 @@ class TestAirtableDedupBlocksRerun:
 
         # ---- B: --dry-run with full ledger → still lists 3 sources.
         # The dry-run path doesn't gate on is_processed, so all 3
-        # fetch + render. We mock fetch_and_parse to return a
-        # deterministic 2-row dataset per source so no network is hit.
-        def _fake_fetch(source_config):
-            return make_fixture_dataset(
-                source_id=source_config["id"],
-                header=["Monat", "Wert"],
-                rows=[["2026/01/01", "1"], ["2026/02/01", "2"]],
-                name_zh=source_config.get("name_zh", source_config["id"]),
-                name_de=source_config.get("name_de", source_config["id"]),
-                url=source_config["url"],
-            )
-
-        monkeypatch.setattr(
-            destatis_daily, "fetch_and_parse", _fake_fetch,
-        )
+        # fetch + render. The ``_fake_fetch`` stub installed above is
+        # still in effect, so no network is hit.
         # Snapshot record count before the dry-run. The dry-run path must
         # not write new ledger rows.
         count_before_dryrun = len(memory)
@@ -574,7 +604,7 @@ class TestAirtableDedupBlocksRerun:
         # The seed records survived the dry-run (dry-run is read-only).
         for sid in seed_ids:
             assert store.is_processed(
-                "destatis_csv", f"destatis:{sid}:latest"
+                "destatis_csv", f"destatis:{sid}:{seed_period}"
             ) is True, f"is_processed should STILL be True for {sid} after dry-run"
 
 

@@ -420,10 +420,14 @@ def _render_index_md(
             lines.append(f"- **原始 CSV**：[連結]({ds.url})")
             lines.append("")
 
+    # Repo name must follow the configured vault root, not a hardcoded string:
+    # with HERMES_VAULT_ROOT set the vault lives in `hermes_vault_collection`,
+    # so a hardcoded `ado_hermes_reddit_scrapper` link is a 404.
+    vault_repo = paths.github_vault_repo()
     lines.extend([
         "## GitHub",
         "",
-        f"https://github.com/clarktao-dev/ado_hermes_reddit_scrapper/"
+        f"https://github.com/clarktao-dev/{vault_repo}/"
         f"blob/main/immobilien-kb/vault/{vault_subdir}/{date_str}/",
     ])
 
